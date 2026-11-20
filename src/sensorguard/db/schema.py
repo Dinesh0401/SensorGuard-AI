@@ -147,12 +147,14 @@ class Observation(Base):
     unit: Mapped[str] = mapped_column(String(32), nullable=False, default="µg/m³")
     quality_flag: Mapped[str] = mapped_column(String(32), nullable=False, default="VALID")
     source_status: Mapped[str] = mapped_column(String(32), nullable=False, default="HEALTHY")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     sensor: Mapped[Sensor] = relationship("Sensor", back_populates="observations")
     raw_batch: Mapped[RawIngestBatch | None] = relationship("RawIngestBatch", back_populates="observations")
 
     __table_args__ = (
-        UniqueConstraint("sensor_id", "observed_at", name="uq_sensor_observed_at"),
+        UniqueConstraint("sensor_id", "observed_at", "version", name="uq_sensor_observed_version"),
+        Index("ix_obs_sensor_observed_version", "sensor_id", "observed_at", "version"),
         Index("ix_obs_sensor_observed", "sensor_id", "observed_at"),
         Index("ix_obs_fetched_at", "fetched_at"),
     )
