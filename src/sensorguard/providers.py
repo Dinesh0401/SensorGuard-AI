@@ -14,7 +14,7 @@ import random
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -120,17 +120,16 @@ class OpenAQClient:
 
     def _execute_request(
         self, method: str, endpoint: str, params: dict[str, Any] | None = None
-    ) -> tuple[dict, str, datetime]:
+    ) -> ApiResponse:
         """Execute an HTTP request with rate limiting and exponential backoff retry.
 
         Returns:
-            Tuple of (parsed_payload_dict, sha256_hash, fetched_at_utc).
+            ApiResponse with parsed payload, response sha256, network receipt fetched_at, and raw_text.
         """
         last_exception: Exception | None = None
 
         for attempt in range(self.max_retries + 1):
             self._rate_limiter.acquire()
-            fetched_at = datetime.now(UTC)
             try:
                 with httpx.Client(
                     base_url=self.base_url, timeout=self.timeout, transport=self._transport
@@ -163,6 +162,8 @@ class OpenAQClient:
                     response.raise_for_status()
 
                 response.raise_for_status()
+                # Record receipt timestamp when bytes have successfully arrived over the network:
+                fetched_at = datetime.now(UTC)
                 raw_text = response.text
                 payload_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
                 payload = response.json()
@@ -170,7 +171,9 @@ class OpenAQClient:
                 if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
                     raise TypeError("unexpected OpenAQ response schema")
 
-                return payload, payload_hash, fetched_at
+                return ApiResponse(
+                    payload=payload, response_hash=payload_hash, fetched_at=fetched_at, raw_text=raw_text
+                )
 
             except (httpx.TimeoutException, httpx.NetworkError) as err:
                 last_exception = err
@@ -186,8 +189,8 @@ class OpenAQClient:
 
     def sensor_hours(self, sensor_id: int, limit: int = 100) -> dict:
         """Fetch a bounded page of hourly measurements (backwards compatibility)."""
-        payload, _, _ = self.get_sensor_hours_raw(sensor_id, limit=limit)
-        return payload
+        resp = self.get_sensor_hours_raw(sensor_id, limit=limit)
+        return resp.payload
 
     def get_sensor_hours_raw(
         self,
@@ -196,7 +199,7 @@ class OpenAQClient:
         datetime_to: str | None = None,
         limit: int = 100,
         page: int = 1,
-    ) -> tuple[dict, str, datetime]:
+    ) -> ApiResponse:
         """Fetch raw hourly measurements page from /v3/sensors/{id}/hours with hash and timestamp."""
         if sensor_id < 1 or not 1 <= limit <= 1000 or page < 1:
             raise ValueError("sensor_id must be >= 1; limit 1..1000; page >= 1")
@@ -215,7 +218,7 @@ class OpenAQClient:
         countries_id: int | None = None,
         limit: int = 100,
         page: int = 1,
-    ) -> tuple[dict, str, datetime]:
+    ) -> ApiResponse:
         """Query monitoring locations/stations catalog.
 
         Args:
@@ -232,7 +235,7 @@ class OpenAQClient:
 
         return self._execute_request("GET", "/v3/locations", params=params)
 
-    def get_location(self, location_id: int) -> tuple[dict, str, datetime]:
+    def get_location(self, location_id: int) -> ApiResponse:
         """Fetch detail and attached sensors for a single monitoring location."""
         if location_id < 1:
             raise ValueError("location_id must be positive")
@@ -245,24 +248,24 @@ class OpenAQClient:
         datetime_to: str | None = None,
         page_size: int = 100,
         max_pages: int = 10,
-    ) -> Iterator[tuple[dict, str, datetime]]:
+    ) -> Iterator[ApiResponse]:
         """Yield pages of sensor hours up to max_pages.
 
         Yields:
-            Tuples of (payload_dict, sha256_hash, fetched_at_utc).
+            ApiResponse with payload, hash, fetched_at, and raw_text.
         """
         for page in range(1, max_pages + 1):
-            payload, payload_hash, fetched_at = self.get_sensor_hours_raw(
+            resp = self.get_sensor_hours_raw(
                 sensor_id=sensor_id,
                 datetime_from=datetime_from,
                 datetime_to=datetime_to,
                 limit=page_size,
                 page=page,
             )
-            results = payload.get("results", [])
+            results = resp.payload.get("results", [])
             if not results:
                 break
-            yield payload, payload_hash, fetched_at
+            yield resp
             if len(results) < page_size:
                 break
 
