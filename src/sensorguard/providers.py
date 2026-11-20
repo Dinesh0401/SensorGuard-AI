@@ -52,6 +52,19 @@ class RateLimiter:
             time.sleep(max(0.01, sleep_time))
 
 
+class ApiResponse(NamedTuple):
+    """Container for API response data, cryptographic checksum, and timing metadata.
+
+    Distinguishes retrieval time (when HTTP response bytes arrived over the network)
+    from downstream database availability (when transaction commits and writes to disk).
+    """
+
+    payload: dict[str, Any]
+    response_hash: str
+    fetched_at: datetime
+    raw_text: str
+
+
 class OpenAQClient:
     """Resilient HTTP client for OpenAQ v3 REST API.
 
