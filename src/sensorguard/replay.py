@@ -19,7 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from sensorguard.db.schema import Observation
@@ -70,11 +70,29 @@ class PointInTimeReplayEngine:
             cutoff_utc = decision_cutoff.astimezone(UTC)
 
         if mode == "prospective":
-            # Prospective mode: only data already fetched and persisted by cutoff
+            # Prospective mode: only data already fetched and persisted by cutoff,
+            # observed at or before cutoff, with physical time not exceeding fetch receipt time.
+            # Picks the highest version available as-of the cutoff timestamp.
+            subq = (
+                select(
+                    Observation.sensor_id.label("s_id"),
+                    Observation.observed_at.label("obs_at"),
+                    func.max(Observation.version).label("max_version"),
+                )
+                .where(
+                    Observation.sensor_id.in_(sensor_ids),
+                    Observation.fetched_at <= cutoff_utc,
+                    Observation.observed_at <= cutoff_utc,
+                    Observation.observed_at <= Observation.fetched_at,
+                )
+                .group_by(Observation.sensor_id, Observation.observed_at)
+                .subquery()
+            )
             stmt = (
                 select(
                     Observation.id,
                     Observation.sensor_id,
+                    Observation.version,
                     Observation.observed_at,
                     Observation.period_start,
                     Observation.period_end,
@@ -85,9 +103,11 @@ class PointInTimeReplayEngine:
                     Observation.quality_flag,
                     Observation.source_status,
                 )
-                .where(
-                    Observation.sensor_id.in_(sensor_ids),
-                    Observation.fetched_at <= cutoff_utc,
+                .join(
+                    subq,
+                    (Observation.sensor_id == subq.c.s_id)
+                    & (Observation.observed_at == subq.c.obs_at)
+                    & (Observation.version == subq.c.max_version),
                 )
                 .order_by(Observation.observed_at)
             )
@@ -98,10 +118,24 @@ class PointInTimeReplayEngine:
             # Retrospective mode: simulated availability with declared delay
             effective_delay = max(0.0, delay_hours)
             effective_cutoff = cutoff_utc - timedelta(hours=effective_delay)
+            subq = (
+                select(
+                    Observation.sensor_id.label("s_id"),
+                    Observation.observed_at.label("obs_at"),
+                    func.max(Observation.version).label("max_version"),
+                )
+                .where(
+                    Observation.sensor_id.in_(sensor_ids),
+                    Observation.observed_at <= effective_cutoff,
+                )
+                .group_by(Observation.sensor_id, Observation.observed_at)
+                .subquery()
+            )
             stmt = (
                 select(
                     Observation.id,
                     Observation.sensor_id,
+                    Observation.version,
                     Observation.observed_at,
                     Observation.period_start,
                     Observation.period_end,
@@ -112,9 +146,11 @@ class PointInTimeReplayEngine:
                     Observation.quality_flag,
                     Observation.source_status,
                 )
-                .where(
-                    Observation.sensor_id.in_(sensor_ids),
-                    Observation.observed_at <= effective_cutoff,
+                .join(
+                    subq,
+                    (Observation.sensor_id == subq.c.s_id)
+                    & (Observation.observed_at == subq.c.obs_at)
+                    & (Observation.version == subq.c.max_version),
                 )
                 .order_by(Observation.observed_at)
             )
@@ -128,6 +164,7 @@ class PointInTimeReplayEngine:
                 columns=[
                     "id",
                     "sensor_id",
+                    "version",
                     "observed_at",
                     "period_start",
                     "period_end",
@@ -156,6 +193,7 @@ class PointInTimeReplayEngine:
                 {
                     "id": r.id,
                     "sensor_id": r.sensor_id,
+                    "version": r.version,
                     "observed_at": r.observed_at,
                     "period_start": r.period_start,
                     "period_end": r.period_end,
@@ -256,3 +294,100 @@ class PointInTimeReplayEngine:
             "status": status,
             "status_reason": reason,
         }
+
+    def build_replay_timeline(
+        self,
+        sensor_id: int,
+        start_time: datetime,
+        end_time: datetime,
+        mode: ReplayMode = "prospective",
+        delay_hours: float = 0.0,
+    ) -> pd.DataFrame:
+        """Construct continuous hourly timeline explicitly categorizing missing slots and delays.
+
+        Fills absent hours with explicit `NO_REPORT` records to prevent unobserved
+        hours from being silently ignored or conflated with hardware failure.
+        """
+        start_utc = start_time.astimezone(UTC) if start_time.tzinfo else start_time.replace(tzinfo=UTC)
+        end_utc = end_time.astimezone(UTC) if end_time.tzinfo else end_time.replace(tzinfo=UTC)
+
+        df, _ = self.query_as_of(
+            sensor_ids=[sensor_id],
+            decision_cutoff=end_utc,
+            mode=mode,
+            delay_hours=delay_hours,
+        )
+
+        expected_hours = pd.date_range(start_utc, end_utc, freq="1h", tz=UTC)
+        if df.empty:
+            timeline_records = []
+            for h in expected_hours:
+                timeline_records.append(
+                    {
+                        "sensor_id": sensor_id,
+                        "observed_at": h,
+                        "value": np.nan,
+                        "unit": "µg/m³",
+                        "quality_flag": "MISSING_SLOT",
+                        "source_status": "NO_REPORT",
+                        "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                    }
+                )
+            return pd.DataFrame(timeline_records)
+
+        obs_map = {}
+        for _, row in df.iterrows():
+            obs_dt = row["observed_at"]
+            if hasattr(obs_dt, "to_pydatetime"):
+                obs_dt = obs_dt.to_pydatetime()
+            if obs_dt.tzinfo is None:
+                obs_dt = obs_dt.replace(tzinfo=UTC)
+            else:
+                obs_dt = obs_dt.astimezone(UTC)
+            obs_map[obs_dt.replace(minute=0, second=0, microsecond=0)] = row
+
+        timeline = []
+        for h in expected_hours:
+            floor_h = h.to_pydatetime().replace(minute=0, second=0, microsecond=0)
+            if floor_h in obs_map:
+                row = obs_map[floor_h]
+                val = row["value"]
+                status = row["source_status"]
+                flag = row["quality_flag"]
+
+                fetched = row["fetched_at"]
+                if hasattr(fetched, "to_pydatetime"):
+                    fetched = fetched.to_pydatetime()
+                if fetched.tzinfo is None:
+                    fetched = fetched.replace(tzinfo=UTC)
+                else:
+                    fetched = fetched.astimezone(UTC)
+
+                if (fetched - floor_h).total_seconds() > 3 * 3600 and status == "HEALTHY":
+                    status = "LATE"
+
+                timeline.append(
+                    {
+                        "sensor_id": sensor_id,
+                        "observed_at": h,
+                        "value": val,
+                        "unit": row["unit"],
+                        "quality_flag": flag,
+                        "source_status": status,
+                        "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                    }
+                )
+            else:
+                timeline.append(
+                    {
+                        "sensor_id": sensor_id,
+                        "observed_at": h,
+                        "value": np.nan,
+                        "unit": "µg/m³",
+                        "quality_flag": "MISSING_SLOT",
+                        "source_status": "NO_REPORT",
+                        "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                    }
+                )
+
+        return pd.DataFrame(timeline)

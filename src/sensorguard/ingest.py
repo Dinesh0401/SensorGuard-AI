@@ -132,6 +132,7 @@ class IngestResult:
     batches_saved: int = 0
     records_fetched: int = 0
     records_inserted: int = 0
+    records_revised: int = 0
     records_deduplicated: int = 0
     records_invalid: int = 0
 
@@ -149,7 +150,11 @@ class IngestionPipeline:
         location_payload: dict[str, Any],
         provider: str = "openaq",
     ) -> tuple[Station, list[Sensor]]:
-        """Idempotently register or update a station and its attached sensors."""
+        """Idempotently register or update a station and its attached sensors.
+
+        Rejects null island (0, 0) and unphysical/missing coordinates to protect
+        spatial research integrity.
+        """
         loc_id = location_payload.get("id")
         if loc_id is None:
             raise ValueError("Location payload missing 'id'")
@@ -164,9 +169,21 @@ class IngestionPipeline:
         lat = coords.get("latitude") if isinstance(coords, dict) else None
         lon = coords.get("longitude") if isinstance(coords, dict) else None
         if lat is None:
-            lat = location_payload.get("latitude", 0.0)
+            lat = location_payload.get("latitude")
         if lon is None:
-            lon = location_payload.get("longitude", 0.0)
+            lon = location_payload.get("longitude")
+
+        if lat is None or lon is None:
+            raise ValueError(f"Location {loc_id} missing coordinates")
+
+        try:
+            lat_f = float(lat)
+            lon_f = float(lon)
+        except (ValueError, TypeError) as err:
+            raise ValueError(f"Location {loc_id} coordinates unparseable: lat={lat}, lon={lon}") from err
+
+        if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0) or (lat_f == 0.0 and lon_f == 0.0):
+            raise ValueError(f"Location {loc_id} coordinates invalid or null island: lat={lat_f}, lon={lon_f}")
 
         name = location_payload.get("name") or f"Station-{loc_id}"
         country_obj = location_payload.get("country")
@@ -184,8 +201,8 @@ class IngestionPipeline:
                 provider=provider,
                 provider_location_id=loc_id,
                 name=name,
-                latitude=float(lat),
-                longitude=float(lon),
+                latitude=lat_f,
+                longitude=lon_f,
                 country=country_code,
                 timezone_name=timezone_name,
                 metadata_json=json.dumps(location_payload),
@@ -194,8 +211,8 @@ class IngestionPipeline:
             self.session.flush()
         else:
             station.name = name
-            station.latitude = float(lat)
-            station.longitude = float(lon)
+            station.latitude = lat_f
+            station.longitude = lon_f
             station.country = country_code
             station.timezone_name = timezone_name
             station.metadata_json = json.dumps(location_payload)
@@ -241,28 +258,32 @@ class IngestionPipeline:
         max_pages: int = 5,
         page_size: int = 100,
     ) -> IngestResult:
-        """Fetch and idempotently persist hourly observations for a sensor."""
+        """Fetch and persist hourly observations for a sensor with versioned revisions.
+
+        Preserves verifiable raw HTTP response text and implements append-only
+        versioning for later revised/corrected measurements.
+        """
         result = IngestResult()
 
-        for payload, payload_hash, fetched_at in client.paginate_sensor_hours(
+        for resp in client.paginate_sensor_hours(
             sensor_id=provider_sensor_id,
             datetime_from=datetime_from,
             datetime_to=datetime_to,
             page_size=page_size,
             max_pages=max_pages,
         ):
-            results = payload.get("results", [])
+            results = resp.payload.get("results", [])
             result.records_fetched += len(results)
 
-            # Store immutable raw batch
+            # Store immutable raw batch preserving exact response text and hash
             raw_batch = RawIngestBatch(
                 provider="openaq",
                 endpoint=f"/v3/sensors/{provider_sensor_id}/hours",
                 params_json=json.dumps({"datetime_from": datetime_from, "datetime_to": datetime_to}),
-                fetched_at=fetched_at,
+                fetched_at=resp.fetched_at,
                 status_code=200,
-                response_hash=payload_hash,
-                payload_json=json.dumps(payload),
+                response_hash=resp.response_hash,
+                payload_json=resp.raw_text,
                 record_count=len(results),
             )
             self.session.add(raw_batch)
@@ -272,7 +293,7 @@ class IngestionPipeline:
             for record in results:
                 try:
                     val = self.validator.validate_openaq_hourly_record(
-                        record, sensor_db_id=sensor_db_id, fetched_at=fetched_at
+                        record, sensor_db_id=sensor_db_id, fetched_at=resp.fetched_at
                     )
                 except (ValueError, TypeError, KeyError):
                     result.records_invalid += 1
@@ -281,31 +302,75 @@ class IngestionPipeline:
                 if val.quality_flag != "VALID":
                     result.records_invalid += 1
 
-                # Idempotent deduplication check
-                obs_stmt = select(Observation).where(
-                    Observation.sensor_id == sensor_db_id,
-                    Observation.observed_at == val.observed_at,
-                )
-                existing = self.session.scalars(obs_stmt).first()
-                if existing:
-                    result.records_deduplicated += 1
-                    continue
+                # Validation of inconsistent timestamps: observation cannot be in the future relative to fetch
+                if val.observed_at > resp.fetched_at:
+                    val_flag = "FUTURE_TIMESTAMP_INCONSISTENCY"
+                    val_status = "INVALID"
+                    result.records_invalid += 1
+                else:
+                    val_flag = val.quality_flag
+                    val_status = val.source_status
 
-                obs = Observation(
-                    sensor_id=sensor_db_id,
-                    raw_batch_id=raw_batch.id,
-                    observed_at=val.observed_at,
-                    period_start=val.period_start,
-                    period_end=val.period_end,
-                    received_at=val.received_at,
-                    fetched_at=val.fetched_at,
-                    value=val.value,
-                    unit=val.unit,
-                    quality_flag=val.quality_flag,
-                    source_status=val.source_status,
+                # Check existing observations for this sensor_id and observed_at (order by version desc)
+                obs_stmt = (
+                    select(Observation)
+                    .where(
+                        Observation.sensor_id == sensor_db_id,
+                        Observation.observed_at == val.observed_at,
+                    )
+                    .order_by(Observation.version.desc())
                 )
-                self.session.add(obs)
-                result.records_inserted += 1
+                latest_existing = self.session.scalars(obs_stmt).first()
+
+                if latest_existing is None:
+                    # Initial observation: version 1
+                    obs = Observation(
+                        sensor_id=sensor_db_id,
+                        raw_batch_id=raw_batch.id,
+                        observed_at=val.observed_at,
+                        period_start=val.period_start,
+                        period_end=val.period_end,
+                        received_at=val.received_at,
+                        fetched_at=val.fetched_at,
+                        value=val.value,
+                        unit=val.unit,
+                        quality_flag=val_flag,
+                        source_status=val_status,
+                        version=1,
+                    )
+                    self.session.add(obs)
+                    result.records_inserted += 1
+                else:
+                    # Check if identical measurement or revised correction
+                    same_val = (
+                        (latest_existing.value == val.value)
+                        or (latest_existing.value is None and val.value is None)
+                    )
+                    same_status = (latest_existing.source_status == val_status) and (
+                        latest_existing.quality_flag == val_flag
+                    )
+                    if same_val and same_status:
+                        # Identical measurement: deduplicate
+                        result.records_deduplicated += 1
+                    else:
+                        # Revised/corrected measurement: append with incremented version
+                        new_version = latest_existing.version + 1
+                        obs = Observation(
+                            sensor_id=sensor_db_id,
+                            raw_batch_id=raw_batch.id,
+                            observed_at=val.observed_at,
+                            period_start=val.period_start,
+                            period_end=val.period_end,
+                            received_at=val.received_at,
+                            fetched_at=val.fetched_at,
+                            value=val.value,
+                            unit=val.unit,
+                            quality_flag=val_flag,
+                            source_status=val_status,
+                            version=new_version,
+                        )
+                        self.session.add(obs)
+                        result.records_revised += 1
 
         self.session.commit()
         return result
