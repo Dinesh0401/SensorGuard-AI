@@ -56,15 +56,21 @@ def generate_network(days: int = 120, stations: int = 6, seed: int = 11) -> pd.D
         wind = np.clip(4 + 2 * np.sin(2 * np.pi * hour / 48) + rng.normal(0, 0.7, len(hour)), 0, None)
         humidity = np.clip(55 + 12 * np.cos(2 * np.pi * hour / 24) + rng.normal(0, 3, len(hour)), 0, 100)
         pm25 = np.clip(common + station * 2 - wind + noise, 0, None)
-        frames.append(pd.DataFrame({
-            "station_id": f"synthetic-{station + 1:02d}",
-            "timestamp": timestamps,
-            "pm25": pm25,
-            "wind_speed": wind,
-            "humidity": humidity,
-            "source": "synthetic",
-        }))
-    return pd.concat(frames, ignore_index=True).sort_values(["station_id", "timestamp"]).reset_index(drop=True)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "station_id": f"synthetic-{station + 1:02d}",
+                    "timestamp": timestamps,
+                    "pm25": pm25,
+                    "wind_speed": wind,
+                    "humidity": humidity,
+                    "source": "synthetic",
+                }
+            )
+        )
+    return (
+        pd.concat(frames, ignore_index=True).sort_values(["station_id", "timestamp"]).reset_index(drop=True)
+    )
 
 
 def _sigmoid(logits: np.ndarray) -> np.ndarray:
@@ -85,9 +91,7 @@ def _calibrated_probability(scores: np.ndarray, rate: float) -> np.ndarray:
     return _sigmoid(scores + (low + high) / 2)
 
 
-def inject_outages(
-    raw: pd.DataFrame, config: OutageConfig
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def inject_outages(raw: pd.DataFrame, config: OutageConfig) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Return masked observations and separate evaluator-only hidden targets.
 
     The ``observed`` result NEVER contains a truth/original target column.
@@ -116,7 +120,7 @@ def inject_outages(
         missing = rng.random(len(rows)) < _calibrated_probability(config.gamma * hidden, config.missing_rate)
     else:
         missing = np.zeros(len(rows), dtype=bool)
-        for _, indexes in rows.groupby("station_id", sort=False).indices.items():
+        for indexes in rows.groupby("station_id", sort=False).indices.values():
             pos = np.asarray(indexes)
             if config.missing_rate == 0:
                 continue

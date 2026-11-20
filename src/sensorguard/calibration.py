@@ -33,5 +33,9 @@ def policy(age_hours: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """
     ages = np.asarray(age_hours, dtype=float)
     statuses = np.where(ages > 12, "abstain", np.where(ages > 3, "caution", "publish"))
-    reasons = np.where(ages > 12, "stale_sensor_history", np.where(ages > 3, "reduced_sensor_freshness", "sufficient_freshness"))
+    reasons = np.where(
+        ages > 12,
+        "stale_sensor_history",
+        np.where(ages > 3, "reduced_sensor_freshness", "sufficient_freshness"),
+    )
     return statuses, reasons

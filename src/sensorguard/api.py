@@ -9,7 +9,9 @@ from fastapi import FastAPI, Query
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.simulation import OutageConfig
 
-app = FastAPI(title="SensorGuard AI", version="0.1.0", description="Synthetic research preview; NOT live air quality")
+app = FastAPI(
+    title="SensorGuard AI", version="0.1.0", description="Synthetic research preview; NOT live air quality"
+)
 
 
 @app.get("/health")

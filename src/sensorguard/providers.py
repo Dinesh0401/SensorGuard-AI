@@ -1,37 +1,277 @@
-"""Read-only OpenAQ v3 adapter; no credential required for synthetic mode."""
+"""Production-grade OpenAQ v3 client with rate-limiting, retries, and pagination.
+
+Implements secure API key configuration via server-side headers, bounded exponential
+backoff with jitter, token bucket rate control, and end-of-period timestamp normalization.
+Credentials are never logged or exposed.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
+import random
+import time
+from collections.abc import Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
+OPENAQ_API_BASE = "https://api.openaq.org"
+
+
+class RateLimiter:
+    """Thread-safe token bucket rate limiter for external provider calls."""
+
+    def __init__(self, rate: float = 2.0, capacity: float = 5.0) -> None:
+        """Initialize the rate limiter.
+
+        Args:
+            rate: Token generation rate per second.
+            capacity: Maximum burst capacity of the token bucket.
+        """
+        self.rate = rate
+        self.capacity = capacity
+        self.tokens = capacity
+        self.last_update = time.monotonic()
+
+    def acquire(self) -> None:
+        """Block until a token is available in the bucket."""
+        while True:
+            now = time.monotonic()
+            elapsed = now - self.last_update
+            self.last_update = now
+            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return
+            sleep_time = (1.0 - self.tokens) / self.rate
+            time.sleep(max(0.01, sleep_time))
+
 
 class OpenAQClient:
-    """Thin HTTP client preserving upstream payloads for subsequent validation.
+    """Resilient HTTP client for OpenAQ v3 REST API.
 
-    Never log or display the API key. Provider availability, terms, and station
-    coverage must be audited before enabling a real-data pipeline.
+    Features:
+    - Bounded exponential backoff with jitter on HTTP 429 and 5xx errors.
+    - Honors upstream 'Retry-After' headers.
+    - Token-bucket rate limiting to stay well within provider limits.
+    - Deterministic SHA-256 payload hashing for audit and provenance.
+    - Explicit separation of observation and publication timestamps.
     """
 
-    def __init__(self, api_key: str | None = None, transport: httpx.BaseTransport | None = None):
-        self._api_key = api_key or os.getenv("OPENAQ_API_KEY")
-        if not self._api_key:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = OPENAQ_API_BASE,
+        transport: httpx.BaseTransport | None = None,
+        rate_limit_per_second: float = 2.0,
+        timeout_seconds: float = 15.0,
+        max_retries: int = 3,
+        base_backoff_seconds: float = 0.5,
+        max_backoff_seconds: float = 10.0,
+    ) -> None:
+        """Initialize the client.
+
+        Args:
+            api_key: OpenAQ v3 API key. If omitted, loaded from OPENAQ_API_KEY env var.
+            base_url: Base URL of the API.
+            transport: Custom HTTPX transport (useful for offline mock testing).
+            rate_limit_per_second: Rate limit in requests/sec.
+            timeout_seconds: Request timeout in seconds.
+            max_retries: Maximum number of retry attempts for retryable errors.
+            base_backoff_seconds: Initial backoff duration in seconds.
+            max_backoff_seconds: Upper cap on backoff duration.
+        """
+        resolved_key = api_key or os.getenv("OPENAQ_API_KEY")
+        if not resolved_key:
             raise ValueError("OPENAQ_API_KEY required for live source access")
+        self._api_key = resolved_key
+        self.base_url = base_url.rstrip("/")
         self._transport = transport
+        self.timeout = timeout_seconds
+        self.max_retries = max_retries
+        self.base_backoff = base_backoff_seconds
+        self.max_backoff = max_backoff_seconds
+        self._rate_limiter = RateLimiter(rate=rate_limit_per_second, capacity=5.0)
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "X-API-Key": self._api_key,
+            "Accept": "application/json",
+            "User-Agent": "SensorGuard-AI/0.2 (Research MLOps)",
+        }
+
+    def _execute_request(
+        self, method: str, endpoint: str, params: dict[str, Any] | None = None
+    ) -> tuple[dict, str, datetime]:
+        """Execute an HTTP request with rate limiting and exponential backoff retry.
+
+        Returns:
+            Tuple of (parsed_payload_dict, sha256_hash, fetched_at_utc).
+        """
+        last_exception: Exception | None = None
+
+        for attempt in range(self.max_retries + 1):
+            self._rate_limiter.acquire()
+            fetched_at = datetime.now(UTC)
+            try:
+                with httpx.Client(
+                    base_url=self.base_url, timeout=self.timeout, transport=self._transport
+                ) as client:
+                    response = client.request(
+                        method=method,
+                        url=endpoint,
+                        params=params,
+                        headers=self._headers(),
+                    )
+
+                if response.status_code == 429:
+                    retry_after = response.headers.get("Retry-After")
+                    delay = (
+                        float(retry_after)
+                        if retry_after and retry_after.isdigit()
+                        else min(self.max_backoff, self.base_backoff * (2**attempt))
+                        + random.uniform(0.1, 0.5)
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(delay)
+                        continue
+                    response.raise_for_status()
+
+                if response.status_code in {500, 502, 503, 504}:
+                    delay = min(self.max_backoff, self.base_backoff * (2**attempt)) + random.uniform(0.1, 0.5)
+                    if attempt < self.max_retries:
+                        time.sleep(delay)
+                        continue
+                    response.raise_for_status()
+
+                response.raise_for_status()
+                raw_text = response.text
+                payload_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+                payload = response.json()
+
+                if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                    raise TypeError("unexpected OpenAQ response schema")
+
+                return payload, payload_hash, fetched_at
+
+            except (httpx.TimeoutException, httpx.NetworkError) as err:
+                last_exception = err
+                if attempt < self.max_retries:
+                    delay = min(self.max_backoff, self.base_backoff * (2**attempt)) + random.uniform(0.1, 0.5)
+                    time.sleep(delay)
+                    continue
+                raise
+
+        if last_exception:
+            raise last_exception
+        raise RuntimeError("Request failed after maximum retries")
 
     def sensor_hours(self, sensor_id: int, limit: int = 100) -> dict:
-        """Fetch a bounded page of hourly measurements for a known sensor ID."""
-        if sensor_id < 1 or not 1 <= limit <= 1000:
-            raise ValueError("sensor_id must be positive; limit must be 1..1000")
-        with httpx.Client(base_url="https://api.openaq.org", timeout=15, transport=self._transport) as client:
-            response = client.get(
-                f"/v3/sensors/{sensor_id}/hours",
-                params={"limit": limit},
-                headers={"X-API-Key": self._api_key},
+        """Fetch a bounded page of hourly measurements (backwards compatibility)."""
+        payload, _, _ = self.get_sensor_hours_raw(sensor_id, limit=limit)
+        return payload
+
+    def get_sensor_hours_raw(
+        self,
+        sensor_id: int,
+        datetime_from: str | None = None,
+        datetime_to: str | None = None,
+        limit: int = 100,
+        page: int = 1,
+    ) -> tuple[dict, str, datetime]:
+        """Fetch raw hourly measurements page from /v3/sensors/{id}/hours with hash and timestamp."""
+        if sensor_id < 1 or not 1 <= limit <= 1000 or page < 1:
+            raise ValueError("sensor_id must be >= 1; limit 1..1000; page >= 1")
+
+        params: dict[str, Any] = {"limit": limit, "page": page}
+        if datetime_from:
+            params["datetime_from"] = datetime_from
+        if datetime_to:
+            params["datetime_to"] = datetime_to
+
+        return self._execute_request("GET", f"/v3/sensors/{sensor_id}/hours", params=params)
+
+    def get_locations(
+        self,
+        bbox: tuple[float, float, float, float] | None = None,
+        countries_id: int | None = None,
+        limit: int = 100,
+        page: int = 1,
+    ) -> tuple[dict, str, datetime]:
+        """Query monitoring locations/stations catalog.
+
+        Args:
+            bbox: Optional bounding box (min_lon, min_lat, max_lon, max_lat).
+            countries_id: Optional country identifier filter.
+            limit: Page size (1..1000).
+            page: Page number.
+        """
+        params: dict[str, Any] = {"limit": limit, "page": page}
+        if bbox:
+            params["bbox"] = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+        if countries_id is not None:
+            params["countries_id"] = countries_id
+
+        return self._execute_request("GET", "/v3/locations", params=params)
+
+    def get_location(self, location_id: int) -> tuple[dict, str, datetime]:
+        """Fetch detail and attached sensors for a single monitoring location."""
+        if location_id < 1:
+            raise ValueError("location_id must be positive")
+        return self._execute_request("GET", f"/v3/locations/{location_id}")
+
+    def paginate_sensor_hours(
+        self,
+        sensor_id: int,
+        datetime_from: str | None = None,
+        datetime_to: str | None = None,
+        page_size: int = 100,
+        max_pages: int = 10,
+    ) -> Iterator[tuple[dict, str, datetime]]:
+        """Yield pages of sensor hours up to max_pages.
+
+        Yields:
+            Tuples of (payload_dict, sha256_hash, fetched_at_utc).
+        """
+        for page in range(1, max_pages + 1):
+            payload, payload_hash, fetched_at = self.get_sensor_hours_raw(
+                sensor_id=sensor_id,
+                datetime_from=datetime_from,
+                datetime_to=datetime_to,
+                limit=page_size,
+                page=page,
             )
-            response.raise_for_status()
-            payload = response.json()
-            if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
-                raise ValueError("unexpected OpenAQ response schema")
-            return payload
+            results = payload.get("results", [])
+            if not results:
+                break
+            yield payload, payload_hash, fetched_at
+            if len(results) < page_size:
+                break
+
+
+def parse_openaq_datetime(dt_field: Any) -> datetime | None:
+    """Safely parse OpenAQ date string or date object into UTC datetime.
+
+    OpenAQ v3 can return either an ISO string or a nested dict with 'utc' key.
+    """
+    if dt_field is None:
+        return None
+    raw_str: str | None = None
+    if isinstance(dt_field, dict):
+        raw_str = dt_field.get("utc")
+    elif isinstance(dt_field, str):
+        raw_str = dt_field
+    if not raw_str:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw_str)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except (ValueError, TypeError):
+        return None

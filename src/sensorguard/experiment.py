@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 import numpy as np
-import pandas as pd
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -23,7 +22,7 @@ class ExperimentConfig:
     days: int = 90
     stations: int = 4
     data_seed: int = 11
-    outage: OutageConfig = OutageConfig()
+    outage: OutageConfig = field(default_factory=OutageConfig)
     alpha: float = 0.1
 
 
@@ -60,7 +59,11 @@ def run_experiment(config: ExperimentConfig = ExperimentConfig()) -> dict:
         "data_mode": "synthetic",
         "calibration_claim": "empirical only; no MNAR coverage guarantee",
         "config": {**asdict(config), "outage": asdict(config.outage)},
-        "partition": {"train_observed": len(train), "calibration_observed": len(calibrate), "test_all_truth_known_to_evaluator": len(test)},
+        "partition": {
+            "train_observed": len(train),
+            "calibration_observed": len(calibrate),
+            "test_all_truth_known_to_evaluator": len(test),
+        },
         "actual_missing_fraction": float((~observed["reported"]).mean()),
         "models": {},
     }
@@ -80,7 +83,10 @@ def run_experiment(config: ExperimentConfig = ExperimentConfig()) -> dict:
         strata = {}
         for label in ("publish", "caution", "abstain"):
             mask = statuses == label
-            strata[label] = {"count": int(mask.sum()), "coverage": float(covered[mask].mean()) if mask.any() else None}
+            strata[label] = {
+                "count": int(mask.sum()),
+                "coverage": float(covered[mask].mean()) if mask.any() else None,
+            }
         output["models"][name] = {"metrics": metrics, "by_status": strata}
     output["policy_counts"] = {label: int((reasons == label).sum()) for label in np.unique(reasons)}
     return output

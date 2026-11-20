@@ -5,9 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-FEATURE_COLUMNS = (
-    "last_pm25", "age_hours", "last_wind", "last_humidity", "hour_sin", "hour_cos"
-)
+FEATURE_COLUMNS = ("last_pm25", "age_hours", "last_wind", "last_humidity", "hour_sin", "hour_cos")
 
 
 def build_features(observed: pd.DataFrame) -> pd.DataFrame:
@@ -36,4 +34,8 @@ def build_features(observed: pd.DataFrame) -> pd.DataFrame:
     df["hour_sin"] = np.sin(2 * np.pi * df["timestamp"].dt.hour / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["timestamp"].dt.hour / 24)
     # Expose neither current target value nor simulator truth to the estimator.
-    return df[["station_id", "timestamp", "reported", *FEATURE_COLUMNS]].dropna(subset=["last_pm25"]).reset_index(drop=True)
+    return (
+        df[["station_id", "timestamp", "reported", *FEATURE_COLUMNS]]
+        .dropna(subset=["last_pm25"])
+        .reset_index(drop=True)
+    )
