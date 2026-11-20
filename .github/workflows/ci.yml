@@ -1,0 +1,28 @@
+name: Python research CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e '.[dev]'
+      - name: Unit and contract tests
+        run: pytest -q
+      - name: Compile source
+        run: python -m compileall -q src
+      - name: Deterministic research smoke test
+        run: python -m sensorguard.cli run-demo --mechanism mnar --seed 17 --output artifacts/benchmark.json
+      - name: Store demonstration artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-benchmark
+          path: artifacts/benchmark.json
