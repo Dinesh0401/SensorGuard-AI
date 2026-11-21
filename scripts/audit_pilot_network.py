@@ -18,8 +18,9 @@ from dotenv import load_dotenv
 from sensorguard.audit import audit_network_feasibility
 from sensorguard.providers import OpenAQClient
 
-# Verified active candidate monitoring stations across Greater London and South East England
-PILOT_LOCATION_IDS = [141, 153, 154, 157, 794, 804, 1795, 2309]
+# 8 verified candidate reference monitoring stations across UK AURN Network
+# (Greater London cluster + South East / Central England reference stations)
+PILOT_LOCATION_IDS = [141, 153, 154, 157, 698, 804, 1795, 2312]
 DEFAULT_WINDOW_FROM = "2024-01-01T00:00:00Z"
 DEFAULT_WINDOW_TO = "2024-03-31T23:59:59Z"
 
