@@ -98,7 +98,10 @@ def test_audit_network_feasibility_dynamic_decision():
                     {
                         "id": loc_id,
                         "name": f"Station-{loc_id}",
-                        "coordinates": {"latitude": 51.5 + (loc_id * 0.01), "longitude": -0.1 + (loc_id * 0.01)},
+                        "coordinates": {
+                            "latitude": 51.5 + (loc_id * 0.01),
+                            "longitude": -0.1 + (loc_id * 0.01),
+                        },
                         "country": {"code": "GB"},
                         "sensors": [{"id": 1000 + loc_id, "parameter": {"name": "pm25", "units": "µg/m³"}}],
                     }

@@ -130,9 +130,7 @@ def audit_sensor_coverage(
                     except (ValueError, TypeError):
                         val_f = None
 
-                if dt_floor not in timestamp_map or (
-                    val_f is not None and timestamp_map[dt_floor] is None
-                ):
+                if dt_floor not in timestamp_map or (val_f is not None and timestamp_map[dt_floor] is None):
                     timestamp_map[dt_floor] = val_f
 
     if not timestamp_map:

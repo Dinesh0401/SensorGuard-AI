@@ -40,9 +40,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_feature_snapshots_cutoff", "forecast_feature_snapshots", ["decision_cutoff"], unique=False
     )
-    op.create_index(
-        "ix_feature_snapshots_hash", "forecast_feature_snapshots", ["feature_hash"], unique=False
-    )
+    op.create_index("ix_feature_snapshots_hash", "forecast_feature_snapshots", ["feature_hash"], unique=False)
 
 
 def downgrade() -> None:
