@@ -30,7 +30,11 @@ def _run_demo(args: argparse.Namespace) -> None:
 def _run_audit(args: argparse.Namespace) -> None:
     client = OpenAQClient()
     report = audit_candidate_location(
-        location_id=args.location_id, client=client, sample_limit=args.sample_limit
+        location_id=args.location_id,
+        client=client,
+        datetime_from=args.datetime_from,
+        datetime_to=args.datetime_to,
+        max_pages=args.max_pages,
     )
     report_dict = asdict(report)
     rendered = json.dumps(report_dict, indent=2, default=str)
@@ -48,8 +52,8 @@ def _run_ingest(args: argparse.Namespace) -> None:
     with session_factory() as session:
         pipeline = IngestionPipeline(session)
         # Fetch location details and register station/sensors
-        loc_payload, _, _ = client.get_location(args.location_id)
-        results = loc_payload.get("results", [])
+        resp = client.get_location(args.location_id)
+        results = resp.payload.get("results", [])
         if not results:
             print(f"Error: Location {args.location_id} not found", file=sys.stderr)
             return
@@ -135,7 +139,9 @@ def main() -> None:
     # audit
     p_audit = subparsers.add_parser("audit", help="Audit OpenAQ candidate location coverage")
     p_audit.add_argument("--location-id", type=int, required=True, help="OpenAQ location ID")
-    p_audit.add_argument("--sample-limit", type=int, default=100)
+    p_audit.add_argument("--datetime-from", type=str, default=None)
+    p_audit.add_argument("--datetime-to", type=str, default=None)
+    p_audit.add_argument("--max-pages", type=int, default=10)
     p_audit.add_argument("--output", type=Path)
     p_audit.set_defaults(func=_run_audit)
 

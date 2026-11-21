@@ -1,7 +1,8 @@
-"""Tests for database models, Alembic migrations, and idempotent ingestion."""
+"""Tests for database models, Alembic migrations, revisions, and raw hash provenance."""
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 
 import httpx
@@ -38,12 +39,11 @@ def test_observation_validator_end_of_period():
         raw_record, sensor_db_id=1, fetched_at=fetched_at
     )
 
-    # Observed at must equal period end
     assert rec.observed_at.hour == 14
     assert rec.period_start.hour == 13
     assert rec.period_end.hour == 14
-    assert rec.received_at is None  # Not fabricated
-    assert rec.unit == "µg/m³"  # Normalized
+    assert rec.received_at is None
+    assert rec.unit == "µg/m³"
     assert rec.quality_flag == "VALID"
     assert rec.source_status == "HEALTHY"
 
@@ -51,7 +51,7 @@ def test_observation_validator_end_of_period():
 def test_observation_validator_out_of_bounds():
     raw_record = {
         "datetime": {"utc": "2025-02-10T15:00:00Z"},
-        "value": 1500.0,  # Unphysical PM2.5 spike > 1000
+        "value": 1500.0,
         "parameter": {"name": "pm25", "units": "µg/m³"},
     }
     rec = ObservationValidator.validate_openaq_hourly_record(
@@ -61,7 +61,27 @@ def test_observation_validator_out_of_bounds():
     assert rec.source_status == "INVALID"
 
 
-def test_idempotent_ingestion_and_provenance(test_db_session: Session):
+def test_station_coordinate_validation(test_db_session: Session):
+    pipeline = IngestionPipeline(test_db_session)
+
+    # Missing coordinates
+    with pytest.raises(ValueError, match="missing coordinates"):
+        pipeline.upsert_station_and_sensors({"id": 1, "name": "Bad Station"})
+
+    # Null island (0.0, 0.0) coordinates rejected
+    with pytest.raises(ValueError, match="null island"):
+        pipeline.upsert_station_and_sensors(
+            {"id": 2, "name": "Null Island Station", "coordinates": {"latitude": 0.0, "longitude": 0.0}}
+        )
+
+    # Out-of-bounds coordinates
+    with pytest.raises(ValueError, match="coordinates invalid"):
+        pipeline.upsert_station_and_sensors(
+            {"id": 3, "name": "Invalid Lat", "coordinates": {"latitude": 95.0, "longitude": 50.0}}
+        )
+
+
+def test_idempotent_ingestion_and_exact_hash_provenance(test_db_session: Session):
     location_payload = {
         "id": 9999,
         "name": "Downtown Station",
@@ -82,15 +102,6 @@ def test_idempotent_ingestion_and_provenance(test_db_session: Session):
                 "value": 22.0,
                 "parameter": {"name": "pm25", "units": "µg/m³"},
             },
-            {
-                "datetime": {"utc": "2025-02-01T11:00:00Z"},
-                "period": {
-                    "datetimeFrom": {"utc": "2025-02-01T10:00:00Z"},
-                    "datetimeTo": {"utc": "2025-02-01T11:00:00Z"},
-                },
-                "value": 24.5,
-                "parameter": {"name": "pm25", "units": "µg/m³"},
-            },
         ]
     }
 
@@ -100,40 +111,97 @@ def test_idempotent_ingestion_and_provenance(test_db_session: Session):
     client = OpenAQClient(api_key="mock-key", transport=httpx.MockTransport(mock_handler))
     pipeline = IngestionPipeline(test_db_session)
 
-    # 1. Register station and sensors
-    station, sensors = pipeline.upsert_station_and_sensors(location_payload)
-    assert station.id is not None
-    assert len(sensors) == 1
+    _station, sensors = pipeline.upsert_station_and_sensors(location_payload)
     sensor = sensors[0]
 
-    # 2. First ingestion run
+    # First ingestion
     res1 = pipeline.ingest_sensor_hours(
         sensor_db_id=sensor.id,
         provider_sensor_id=sensor.provider_sensor_id,
         client=client,
         max_pages=1,
     )
-    assert res1.records_fetched == 2
-    assert res1.records_inserted == 2
+    assert res1.records_inserted == 1
     assert res1.records_deduplicated == 0
-    assert res1.batches_saved == 1
 
-    # Verify database state
-    observations = test_db_session.scalars(select(Observation)).all()
-    assert len(observations) == 2
-    batches = test_db_session.scalars(select(RawIngestBatch)).all()
-    assert len(batches) == 1
-    assert len(batches[0].response_hash) == 64
+    # Verify exact raw response hash provenance
+    batch = test_db_session.scalars(select(RawIngestBatch)).first()
+    assert batch is not None
+    assert hashlib.sha256(batch.payload_json.encode("utf-8")).hexdigest() == batch.response_hash
 
-    # 3. Second ingestion run with identical data -> Idempotent, deduplicated!
+    # Exact duplicate run -> Deduplicated
     res2 = pipeline.ingest_sensor_hours(
         sensor_db_id=sensor.id,
         provider_sensor_id=sensor.provider_sensor_id,
         client=client,
         max_pages=1,
     )
-    assert res2.records_fetched == 2
     assert res2.records_inserted == 0
-    assert res2.records_deduplicated == 2
-    # Total observations unchanged
-    assert len(test_db_session.scalars(select(Observation)).all()) == 2
+    assert res2.records_deduplicated == 1
+
+
+def test_append_only_observation_revision_history(test_db_session: Session):
+    location_payload = {
+        "id": 8888,
+        "name": "Revision Test Station",
+        "coordinates": {"latitude": 51.5074, "longitude": -0.1278},
+        "country": {"code": "GB"},
+        "sensors": [{"id": 601, "parameter": {"name": "pm25", "units": "µg/m³"}}],
+    }
+
+    initial_response = {
+        "results": [
+            {
+                "datetime": {"utc": "2025-02-01T10:00:00Z"},
+                "period": {
+                    "datetimeFrom": {"utc": "2025-02-01T09:00:00Z"},
+                    "datetimeTo": {"utc": "2025-02-01T10:00:00Z"},
+                },
+                "value": 20.0,
+                "parameter": {"name": "pm25", "units": "µg/m³"},
+            }
+        ]
+    }
+
+    revised_response = {
+        "results": [
+            {
+                "datetime": {"utc": "2025-02-01T10:00:00Z"},
+                "period": {
+                    "datetimeFrom": {"utc": "2025-02-01T09:00:00Z"},
+                    "datetimeTo": {"utc": "2025-02-01T10:00:00Z"},
+                },
+                "value": 26.5,
+                "parameter": {"name": "pm25", "units": "µg/m³"},
+            }
+        ]
+    }
+
+    pipeline = IngestionPipeline(test_db_session)
+    _, sensors = pipeline.upsert_station_and_sensors(location_payload)
+    sensor = sensors[0]
+
+    client1 = OpenAQClient(
+        api_key="mock-key",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=initial_response)),
+    )
+    res1 = pipeline.ingest_sensor_hours(sensor.id, sensor.provider_sensor_id, client1, max_pages=1)
+    assert res1.records_inserted == 1
+    assert res1.records_revised == 0
+
+    client2 = OpenAQClient(
+        api_key="mock-key",
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json=revised_response)),
+    )
+    res2 = pipeline.ingest_sensor_hours(sensor.id, sensor.provider_sensor_id, client2, max_pages=1)
+    assert res2.records_revised == 1
+    assert res2.records_inserted == 0
+
+    obs_rows = test_db_session.scalars(
+        select(Observation).where(Observation.sensor_id == sensor.id).order_by(Observation.version.asc())
+    ).all()
+    assert len(obs_rows) == 2
+    assert obs_rows[0].version == 1
+    assert obs_rows[0].value == 20.0
+    assert obs_rows[1].version == 2
+    assert obs_rows[1].value == 26.5

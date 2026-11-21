@@ -183,7 +183,9 @@ class IngestionPipeline:
             raise ValueError(f"Location {loc_id} coordinates unparseable: lat={lat}, lon={lon}") from err
 
         if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0) or (lat_f == 0.0 and lon_f == 0.0):
-            raise ValueError(f"Location {loc_id} coordinates invalid or null island: lat={lat_f}, lon={lon_f}")
+            raise ValueError(
+                f"Location {loc_id} coordinates invalid or null island: lat={lat_f}, lon={lon_f}"
+            )
 
         name = location_payload.get("name") or f"Station-{loc_id}"
         country_obj = location_payload.get("country")
@@ -342,9 +344,8 @@ class IngestionPipeline:
                     result.records_inserted += 1
                 else:
                     # Check if identical measurement or revised correction
-                    same_val = (
-                        (latest_existing.value == val.value)
-                        or (latest_existing.value is None and val.value is None)
+                    same_val = (latest_existing.value == val.value) or (
+                        latest_existing.value is None and val.value is None
                     )
                     same_status = (latest_existing.source_status == val_status) and (
                         latest_existing.quality_flag == val_flag

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -209,6 +210,9 @@ class PointInTimeReplayEngine:
                 for r in rows
             ]
         )
+
+        df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True)
+        df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
 
         summary = ReplayCutoffSummary(
             decision_cutoff=cutoff_utc.isoformat(),

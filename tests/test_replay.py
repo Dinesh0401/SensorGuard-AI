@@ -1,4 +1,4 @@
-"""Tests for PointInTimeReplayEngine preventing future data leakage."""
+"""Tests for PointInTimeReplayEngine preventing future data leakage and recovering point-in-time versions."""
 
 from __future__ import annotations
 
@@ -39,9 +39,9 @@ def populated_session():
     session.flush()
 
     # Create observations:
-    # Hour 1: observed at 10:00, fetched at 10:05 (contemporaneous)
-    # Hour 2: observed at 11:00, fetched at 11:05 (contemporaneous)
-    # Hour 3: observed at 12:00, fetched at 17:00 (BACKFILLED late!)
+    # Hour 1: observed at 10:00, fetched at 10:05 (contemporaneous, v1)
+    # Hour 2: observed at 11:00, fetched at 11:05 (contemporaneous, v1)
+    # Hour 3: observed at 12:00, fetched at 17:00 (BACKFILLED late!, v1)
     obs1 = Observation(
         sensor_id=sensor.id,
         observed_at=datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
@@ -50,6 +50,7 @@ def populated_session():
         unit="µg/m³",
         quality_flag="VALID",
         source_status="HEALTHY",
+        version=1,
     )
     obs2 = Observation(
         sensor_id=sensor.id,
@@ -59,6 +60,7 @@ def populated_session():
         unit="µg/m³",
         quality_flag="VALID",
         source_status="HEALTHY",
+        version=1,
     )
     obs3 = Observation(
         sensor_id=sensor.id,
@@ -68,6 +70,7 @@ def populated_session():
         unit="µg/m³",
         quality_flag="VALID",
         source_status="HEALTHY",
+        version=1,
     )
     session.add_all([obs1, obs2, obs3])
     session.commit()
@@ -91,29 +94,99 @@ def test_prospective_replay_rejects_backfilled_future_data(populated_session: Se
     assert 20.0 not in df["value"].values
 
 
-def test_retrospective_replay_simulates_publication_delay(populated_session: Session):
+def test_prospective_replay_enforces_both_fetched_and_observed_at_cutoff(populated_session: Session):
     engine = PointInTimeReplayEngine(populated_session)
 
-    # In retrospective mode with 1-hour delay at cutoff 12:00:
-    # Effective cutoff is 11:00 UTC (12:00 - 1h delay).
-    # obs1 (10:00) and obs2 (11:00) are <= 11:00, obs3 (12:00) is excluded.
-    cutoff = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
-    df, summary = engine.query_as_of(
-        sensor_ids=[1], decision_cutoff=cutoff, mode="retrospective", delay_hours=1.0
+    # Add a corrupt record fetched at 10:00 claiming observed_at = 14:00 (future relative to cutoff 11:00)
+    future_obs = Observation(
+        sensor_id=1,
+        observed_at=datetime(2025, 3, 1, 14, 0, tzinfo=UTC),
+        fetched_at=datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
+        value=99.0,
+        unit="µg/m³",
+        quality_flag="VALID",
+        source_status="HEALTHY",
+        version=1,
     )
+    populated_session.add(future_obs)
+    populated_session.commit()
 
-    assert summary.mode == "retrospective"
-    assert summary.is_simulated_availability is True
-    assert summary.assumed_delay_hours == 1.0
-    assert len(df) == 2
-    assert (df["simulated_availability"] == True).all()
+    # Query as of 11:00:
+    # future_obs has fetched_at (10:00) <= 11:00, BUT observed_at (14:00) > 11:00 and observed_at > fetched_at!
+    # Prospective replay must reject it.
+    cutoff = datetime(2025, 3, 1, 11, 0, tzinfo=UTC)
+    df, _ = engine.query_as_of(sensor_ids=[1], decision_cutoff=cutoff, mode="prospective")
+
+    assert 99.0 not in df["value"].values
+
+
+def test_point_in_time_version_recovery(populated_session: Session):
+    engine = PointInTimeReplayEngine(populated_session)
+
+    # Insert a revised correction for Hour 2 (11:00) fetched at 15:00 UTC (version 2, value corrected to 24.0)
+    revised_obs2 = Observation(
+        sensor_id=1,
+        observed_at=datetime(2025, 3, 1, 11, 0, tzinfo=UTC),
+        fetched_at=datetime(2025, 3, 1, 15, 0, tzinfo=UTC),
+        value=24.0,  # corrected from 18.0
+        unit="µg/m³",
+        quality_flag="VALID",
+        source_status="HEALTHY",
+        version=2,
+    )
+    populated_session.add(revised_obs2)
+    populated_session.commit()
+
+    # As-of Cutoff 12:00: Version 2 was NOT yet fetched (fetched at 15:00).
+    # Replay MUST return Version 1 (value 18.0).
+    df_early, _ = engine.query_as_of(
+        sensor_ids=[1], decision_cutoff=datetime(2025, 3, 1, 12, 0, tzinfo=UTC), mode="prospective"
+    )
+    obs_at_11 = df_early[df_early["observed_at"] == datetime(2025, 3, 1, 11, 0, tzinfo=UTC)].iloc[0]
+    assert obs_at_11["version"] == 1
+    assert obs_at_11["value"] == 18.0
+
+    # As-of Cutoff 16:00: Version 2 HAS been fetched by 15:00.
+    # Replay MUST return Version 2 (value 24.0).
+    df_late, _ = engine.query_as_of(
+        sensor_ids=[1], decision_cutoff=datetime(2025, 3, 1, 16, 0, tzinfo=UTC), mode="prospective"
+    )
+    obs_at_11_latest = df_late[df_late["observed_at"] == datetime(2025, 3, 1, 11, 0, tzinfo=UTC)].iloc[0]
+    assert obs_at_11_latest["version"] == 2
+    assert obs_at_11_latest["value"] == 24.0
+
+
+def test_build_replay_timeline_explicit_missing_and_late_slots(populated_session: Session):
+    engine = PointInTimeReplayEngine(populated_session)
+
+    # Timeline spanning 10:00 to 13:00 (4 hourly slots: 10, 11, 12, 13)
+    # 10:00 -> On-time HEALTHY (obs1 fetched 10:05)
+    # 11:00 -> On-time HEALTHY (obs2 fetched 11:05)
+    # 12:00 -> Late reporting (obs3 fetched 17:00, 5 hours delay > 3h threshold!)
+    # 13:00 -> Absent / unobserved slot -> NO_REPORT / MISSING_SLOT
+    start = datetime(2025, 3, 1, 10, 0, tzinfo=UTC)
+    end = datetime(2025, 3, 1, 18, 0, tzinfo=UTC)
+
+    timeline = engine.build_replay_timeline(sensor_id=1, start_time=start, end_time=end)
+
+    assert len(timeline) >= 4
+
+    t10 = timeline[timeline["observed_at"] == datetime(2025, 3, 1, 10, 0, tzinfo=UTC)].iloc[0]
+    assert t10["source_status"] == "HEALTHY"
+    assert t10["value"] == 15.0
+
+    t12 = timeline[timeline["observed_at"] == datetime(2025, 3, 1, 12, 0, tzinfo=UTC)].iloc[0]
+    assert t12["source_status"] == "LATE"  # 5 hours delay detected!
+    assert t12["value"] == 20.0
+
+    t13 = timeline[timeline["observed_at"] == datetime(2025, 3, 1, 13, 0, tzinfo=UTC)].iloc[0]
+    assert t13["source_status"] == "NO_REPORT"  # Missing slot explicitly identified
+    assert t13["quality_flag"] == "MISSING_SLOT"
 
 
 def test_point_in_time_forecast_features_no_target_leakage(populated_session: Session):
     engine = PointInTimeReplayEngine(populated_session)
 
-    # Cutoff at 11:30 -> Target is 12:30.
-    # Features must use only the last available observation at 11:00 (value = 18.0)
     cutoff = datetime(2025, 3, 1, 11, 30, tzinfo=UTC)
     features = engine.build_point_in_time_forecast_features(sensor_id=1, decision_cutoff=cutoff)
 

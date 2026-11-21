@@ -46,13 +46,34 @@ class StationAuditReport:
 def audit_sensor_coverage(
     sensor_id: int,
     client: OpenAQClient,
-    sample_limit: int = 100,
+    datetime_from: str | None = None,
+    datetime_to: str | None = None,
+    max_pages: int = 10,
+    page_size: int = 100,
 ) -> SensorCoverageStats:
-    """Audit an individual sensor's coverage, cadence, and missingness."""
-    payload, _, _ = client.get_sensor_hours_raw(sensor_id=sensor_id, limit=sample_limit)
-    results = payload.get("results", [])
+    """Audit an individual sensor's coverage, cadence, and missingness across paginated date ranges."""
+    timestamps: list[datetime] = []
+    unit = "µg/m³"
+    param_name = "pm25"
 
-    if not results:
+    for resp in client.paginate_sensor_hours(
+        sensor_id=sensor_id,
+        datetime_from=datetime_from,
+        datetime_to=datetime_to,
+        page_size=page_size,
+        max_pages=max_pages,
+    ):
+        results = resp.payload.get("results", [])
+        for r in results:
+            param_obj = r.get("parameter") or {}
+            if isinstance(param_obj, dict):
+                unit = param_obj.get("units", unit)
+                param_name = param_obj.get("name", param_name)
+            dt = parse_openaq_datetime(r.get("datetime"))
+            if dt:
+                timestamps.append(dt)
+
+    if not timestamps:
         return SensorCoverageStats(
             sensor_id=sensor_id,
             parameter="pm25",
@@ -66,42 +87,26 @@ def audit_sensor_coverage(
             is_usable_history=False,
         )
 
-    timestamps: list[datetime] = []
-    unit = "µg/m³"
-    param_name = "pm25"
-
-    for r in results:
-        param_obj = r.get("parameter") or {}
-        if isinstance(param_obj, dict):
-            unit = param_obj.get("units", unit)
-            param_name = param_obj.get("name", param_name)
-        dt = parse_openaq_datetime(r.get("datetime"))
-        if dt:
-            timestamps.append(dt)
-
     timestamps.sort()
     total = len(timestamps)
 
-    if total < 2:
-        return SensorCoverageStats(
-            sensor_id=sensor_id,
-            parameter=param_name,
-            unit=unit,
-            total_records=total,
-            first_observed_at=timestamps[0].isoformat() if timestamps else None,
-            last_observed_at=timestamps[-1].isoformat() if timestamps else None,
-            hours_spanned=1.0,
-            missing_gap_rate=0.0,
-            cadence_hours=1.0,
-            is_usable_history=False,
-        )
-
     first_dt = timestamps[0]
     last_dt = timestamps[-1]
-    hours_spanned = max(1.0, (last_dt - first_dt).total_seconds() / 3600.0)
 
-    # Expected hourly records in that span
-    expected_hours = max(1.0, hours_spanned + 1.0)
+    # Calculate expected hours: if explicit window supplied, compute across entire window
+    if datetime_from and datetime_to:
+        req_from = parse_openaq_datetime(datetime_from)
+        req_to = parse_openaq_datetime(datetime_to)
+        if req_from and req_to and req_to > req_from:
+            hours_spanned = max(1.0, (req_to - req_from).total_seconds() / 3600.0)
+            expected_hours = hours_spanned + 1.0
+        else:
+            hours_spanned = max(1.0, (last_dt - first_dt).total_seconds() / 3600.0)
+            expected_hours = max(1.0, hours_spanned + 1.0)
+    else:
+        hours_spanned = max(1.0, (last_dt - first_dt).total_seconds() / 3600.0)
+        expected_hours = max(1.0, hours_spanned + 1.0)
+
     gap_rate = max(0.0, 1.0 - (total / expected_hours))
     cadence = hours_spanned / max(1, total - 1)
 
@@ -125,19 +130,41 @@ def audit_sensor_coverage(
 def audit_candidate_location(
     location_id: int,
     client: OpenAQClient,
-    sample_limit: int = 100,
+    datetime_from: str | None = None,
+    datetime_to: str | None = None,
+    max_pages: int = 10,
+    page_size: int = 100,
 ) -> StationAuditReport:
-    """Audit a specific location and all its PM2.5 sensors."""
-    payload, _, _ = client.get_location(location_id)
-    results = payload.get("results", [])
+    """Audit a specific location and all its PM2.5 sensors with coordinate verification."""
+    resp = client.get_location(location_id)
+    results = resp.payload.get("results", [])
     if not results:
         raise ValueError(f"Location {location_id} not found or returned empty results")
 
     loc_data = results[0] if isinstance(results, list) else results
     name = loc_data.get("name", f"Location-{location_id}")
     coords = loc_data.get("coordinates") or {}
-    lat = coords.get("latitude", 0.0) if isinstance(coords, dict) else 0.0
-    lon = coords.get("longitude", 0.0) if isinstance(coords, dict) else 0.0
+    lat = coords.get("latitude") if isinstance(coords, dict) else None
+    lon = coords.get("longitude") if isinstance(coords, dict) else None
+    if lat is None:
+        lat = loc_data.get("latitude")
+    if lon is None:
+        lon = loc_data.get("longitude")
+
+    if lat is None or lon is None:
+        raise ValueError(f"Location {location_id} missing coordinates")
+
+    try:
+        lat_f = float(lat)
+        lon_f = float(lon)
+    except (ValueError, TypeError) as err:
+        raise ValueError(f"Location {location_id} coordinates unparseable: lat={lat}, lon={lon}") from err
+
+    if not (-90.0 <= lat_f <= 90.0) or not (-180.0 <= lon_f <= 180.0) or (lat_f == 0.0 and lon_f == 0.0):
+        raise ValueError(
+            f"Location {location_id} coordinates invalid or null island: lat={lat_f}, lon={lon_f}"
+        )
+
     country = loc_data.get("country", {}).get("code") if isinstance(loc_data.get("country"), dict) else None
 
     raw_sensors = loc_data.get("sensors", [])
@@ -154,7 +181,14 @@ def audit_candidate_location(
     for s in pm25_sensors:
         sid = s.get("id")
         if sid:
-            stats = audit_sensor_coverage(sensor_id=sid, client=client, sample_limit=sample_limit)
+            stats = audit_sensor_coverage(
+                sensor_id=sid,
+                client=client,
+                datetime_from=datetime_from,
+                datetime_to=datetime_to,
+                max_pages=max_pages,
+                page_size=page_size,
+            )
             sensor_stats.append(stats)
 
     usable_pm25 = sum(1 for s in sensor_stats if s.is_usable_history)
@@ -168,8 +202,8 @@ def audit_candidate_location(
     return StationAuditReport(
         location_id=location_id,
         station_name=name,
-        latitude=float(lat),
-        longitude=float(lon),
+        latitude=lat_f,
+        longitude=lon_f,
         country=country,
         pm25_sensor_count=len(pm25_sensors),
         sensors=sensor_stats,

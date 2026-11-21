@@ -13,8 +13,9 @@ import os
 import random
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import Any
 
 import httpx
 
@@ -52,17 +53,22 @@ class RateLimiter:
             time.sleep(max(0.01, sleep_time))
 
 
-class ApiResponse(NamedTuple):
+@dataclass(frozen=True)
+class ApiResponse:
     """Container for API response data, cryptographic checksum, and timing metadata.
 
     Distinguishes retrieval time (when HTTP response bytes arrived over the network)
     from downstream database availability (when transaction commits and writes to disk).
+    Supports unpacking as (payload, response_hash, fetched_at) for backwards compatibility.
     """
 
     payload: dict[str, Any]
     response_hash: str
     fetched_at: datetime
     raw_text: str
+
+    def __iter__(self):
+        return iter((self.payload, self.response_hash, self.fetched_at))
 
 
 class OpenAQClient:
