@@ -59,6 +59,7 @@ class ApiResponse:
 
     Distinguishes retrieval time (when HTTP response bytes arrived over the network)
     from downstream database availability (when transaction commits and writes to disk).
+    Preserves exact raw HTTP bytes for tamper-evident provenance verification.
     Supports unpacking as (payload, response_hash, fetched_at) for backwards compatibility.
     """
 
@@ -66,6 +67,7 @@ class ApiResponse:
     response_hash: str
     fetched_at: datetime
     raw_text: str
+    raw_bytes: bytes = b""
 
     def __iter__(self):
         return iter((self.payload, self.response_hash, self.fetched_at))
@@ -171,7 +173,8 @@ class OpenAQClient:
                 # Record receipt timestamp when bytes have successfully arrived over the network:
                 fetched_at = datetime.now(UTC)
                 # Compute hash directly over raw HTTP response wire bytes (response.content)
-                payload_hash = hashlib.sha256(response.content).hexdigest()
+                raw_bytes = response.content
+                payload_hash = hashlib.sha256(raw_bytes).hexdigest()
                 raw_text = response.text
                 payload = response.json()
 
@@ -179,7 +182,11 @@ class OpenAQClient:
                     raise TypeError("unexpected OpenAQ response schema")
 
                 return ApiResponse(
-                    payload=payload, response_hash=payload_hash, fetched_at=fetched_at, raw_text=raw_text
+                    payload=payload,
+                    response_hash=payload_hash,
+                    fetched_at=fetched_at,
+                    raw_text=raw_text,
+                    raw_bytes=raw_bytes,
                 )
 
             except (httpx.TimeoutException, httpx.NetworkError) as err:
