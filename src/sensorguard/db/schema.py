@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -116,6 +117,7 @@ class RawIngestBatch(Base):
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     response_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
+    raw_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     observations: Mapped[list[Observation]] = relationship("Observation", back_populates="raw_batch")
@@ -171,3 +173,29 @@ class Observation(Base):
         Index("ix_obs_fetched_at", "fetched_at"),
         Index("ix_obs_persisted_at", "persisted_at"),
     )
+
+
+class ForecastFeatureSnapshot(Base):
+    """Immutable snapshot of point-in-time features served to a model inference run.
+
+    Provides cryptographic proof of exact feature inputs visible at decision cutoff,
+    preventing any ambiguity regarding database commit timing or subsequent updates.
+    """
+
+    __tablename__ = "forecast_feature_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sensor_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sensors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    decision_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    target_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    features_json: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    sensor: Mapped[Sensor] = relationship("Sensor")
