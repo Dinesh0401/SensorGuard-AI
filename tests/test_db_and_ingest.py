@@ -61,6 +61,56 @@ def test_observation_validator_out_of_bounds():
     assert rec.source_status == "INVALID"
 
 
+def test_observation_validator_missing_unit_rejection():
+    raw_record_no_unit = {
+        "datetime": {"utc": "2025-02-10T15:00:00Z"},
+        "value": 25.0,
+        "parameter": {"name": "pm25"},  # missing units
+    }
+    rec1 = ObservationValidator.validate_openaq_hourly_record(
+        raw_record_no_unit, sensor_db_id=1, fetched_at=datetime.now(UTC)
+    )
+    assert rec1.quality_flag == "MISSING_UNIT"
+    assert rec1.source_status == "INVALID"
+
+    raw_record_empty_unit = {
+        "datetime": {"utc": "2025-02-10T15:00:00Z"},
+        "value": 25.0,
+        "parameter": {"name": "pm25", "units": "   "},
+    }
+    rec2 = ObservationValidator.validate_openaq_hourly_record(
+        raw_record_empty_unit, sensor_db_id=1, fetched_at=datetime.now(UTC)
+    )
+    assert rec2.quality_flag == "MISSING_UNIT"
+    assert rec2.source_status == "INVALID"
+
+
+def test_observation_validator_non_finite_rejection():
+    raw_record_nan = {
+        "datetime": {"utc": "2025-02-10T15:00:00Z"},
+        "value": float("nan"),
+        "parameter": {"name": "pm25", "units": "µg/m³"},
+    }
+    rec_nan = ObservationValidator.validate_openaq_hourly_record(
+        raw_record_nan, sensor_db_id=1, fetched_at=datetime.now(UTC)
+    )
+    assert rec_nan.quality_flag == "NON_FINITE_VALUE"
+    assert rec_nan.source_status == "INVALID"
+    assert rec_nan.value is None
+
+    raw_record_inf = {
+        "datetime": {"utc": "2025-02-10T15:00:00Z"},
+        "value": float("inf"),
+        "parameter": {"name": "pm25", "units": "µg/m³"},
+    }
+    rec_inf = ObservationValidator.validate_openaq_hourly_record(
+        raw_record_inf, sensor_db_id=1, fetched_at=datetime.now(UTC)
+    )
+    assert rec_inf.quality_flag == "NON_FINITE_VALUE"
+    assert rec_inf.source_status == "INVALID"
+    assert rec_inf.value is None
+
+
 def test_station_coordinate_validation(test_db_session: Session):
     pipeline = IngestionPipeline(test_db_session)
 
@@ -203,5 +253,7 @@ def test_append_only_observation_revision_history(test_db_session: Session):
     assert len(obs_rows) == 2
     assert obs_rows[0].version == 1
     assert obs_rows[0].value == 20.0
+    assert obs_rows[0].persisted_at is not None
     assert obs_rows[1].version == 2
     assert obs_rows[1].value == 26.5
+    assert obs_rows[1].persisted_at is not None
