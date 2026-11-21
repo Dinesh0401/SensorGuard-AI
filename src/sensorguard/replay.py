@@ -405,7 +405,9 @@ class PointInTimeReplayEngine:
                         "source_status": status,
                         "age_hours": (end_utc - h).total_seconds() / 3600.0,
                         "reporting_latency_hours": reporting_latency_hours,
-                        "backfill_lag_hours": round(max(0.0, (fetched - floor_h).total_seconds() / 3600.0), 2),
+                        "backfill_lag_hours": round(
+                            max(0.0, (fetched - floor_h).total_seconds() / 3600.0), 2
+                        ),
                     }
                 )
             else:

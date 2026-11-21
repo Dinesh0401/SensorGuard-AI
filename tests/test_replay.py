@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -46,6 +47,7 @@ def populated_session():
         sensor_id=sensor.id,
         observed_at=datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
         fetched_at=datetime(2025, 3, 1, 10, 5, tzinfo=UTC),
+        persisted_at=datetime(2025, 3, 1, 10, 5, 2, tzinfo=UTC),
         value=15.0,
         unit="µg/m³",
         quality_flag="VALID",
@@ -56,6 +58,7 @@ def populated_session():
         sensor_id=sensor.id,
         observed_at=datetime(2025, 3, 1, 11, 0, tzinfo=UTC),
         fetched_at=datetime(2025, 3, 1, 11, 5, tzinfo=UTC),
+        persisted_at=datetime(2025, 3, 1, 11, 5, 2, tzinfo=UTC),
         value=18.0,
         unit="µg/m³",
         quality_flag="VALID",
@@ -66,6 +69,7 @@ def populated_session():
         sensor_id=sensor.id,
         observed_at=datetime(2025, 3, 1, 12, 0, tzinfo=UTC),
         fetched_at=datetime(2025, 3, 1, 17, 0, tzinfo=UTC),  # backfilled at 17:00!
+        persisted_at=datetime(2025, 3, 1, 17, 0, 5, tzinfo=UTC),
         value=20.0,
         unit="µg/m³",
         quality_flag="VALID",
@@ -102,6 +106,7 @@ def test_prospective_replay_enforces_both_fetched_and_observed_at_cutoff(populat
         sensor_id=1,
         observed_at=datetime(2025, 3, 1, 14, 0, tzinfo=UTC),
         fetched_at=datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
+        persisted_at=datetime(2025, 3, 1, 10, 0, tzinfo=UTC),
         value=99.0,
         unit="µg/m³",
         quality_flag="VALID",
@@ -128,6 +133,7 @@ def test_point_in_time_version_recovery(populated_session: Session):
         sensor_id=1,
         observed_at=datetime(2025, 3, 1, 11, 0, tzinfo=UTC),
         fetched_at=datetime(2025, 3, 1, 15, 0, tzinfo=UTC),
+        persisted_at=datetime(2025, 3, 1, 15, 0, tzinfo=UTC),
         value=24.0,  # corrected from 18.0
         unit="µg/m³",
         quality_flag="VALID",
@@ -194,3 +200,84 @@ def test_point_in_time_forecast_features_no_target_leakage(populated_session: Se
     assert features["age_hours"] == 0.5
     assert features["status"] == "publish"
     assert features["target_time"] == datetime(2025, 3, 1, 12, 30, tzinfo=UTC).isoformat()
+
+
+def test_prospective_replay_enforces_persisted_at(populated_session: Session):
+    engine = PointInTimeReplayEngine(populated_session)
+
+    # Record fetched at 11:50, but disk persistence committed at 12:10
+    delayed_persist_obs = Observation(
+        sensor_id=1,
+        observed_at=datetime(2025, 3, 1, 11, 45, tzinfo=UTC),
+        fetched_at=datetime(2025, 3, 1, 11, 50, tzinfo=UTC),
+        persisted_at=datetime(2025, 3, 1, 12, 10, tzinfo=UTC),
+        value=55.0,
+        unit="µg/m³",
+        quality_flag="VALID",
+        source_status="HEALTHY",
+        version=1,
+    )
+    populated_session.add(delayed_persist_obs)
+    populated_session.commit()
+
+    # Query as of 12:00: fetched_at (11:50) <= 12:00, BUT persisted_at (12:10) > 12:00!
+    # In strict prospective mode, data unpersisted at cutoff MUST NOT be visible.
+    cutoff_1200 = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
+    df_1200, _ = engine.query_as_of(sensor_ids=[1], decision_cutoff=cutoff_1200, mode="prospective")
+    assert 55.0 not in df_1200["value"].values
+
+    # Query as of 12:15: persisted_at (12:10) <= 12:15 -> now visible
+    cutoff_1215 = datetime(2025, 3, 1, 12, 15, tzinfo=UTC)
+    df_1215, _ = engine.query_as_of(sensor_ids=[1], decision_cutoff=cutoff_1215, mode="prospective")
+    assert 55.0 in df_1215["value"].values
+
+
+def test_build_replay_timeline_distinguishes_backfill_from_late_reporting(populated_session: Session):
+    engine = PointInTimeReplayEngine(populated_session)
+
+    # 1. Historical backfill: observed 2024-01-01, fetched 2024-06-01 (3600 hours later), no received_at
+    backfill_obs = Observation(
+        sensor_id=1,
+        observed_at=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+        fetched_at=datetime(2024, 6, 1, 10, 0, tzinfo=UTC),
+        persisted_at=datetime(2024, 6, 1, 10, 1, tzinfo=UTC),
+        received_at=None,
+        value=12.0,
+        unit="µg/m³",
+        quality_flag="VALID",
+        source_status="HEALTHY",
+        version=1,
+    )
+    # 2. Genuine reporting delay with upstream received_at: observed 2024-01-01 11:00, received 15:00 (4h delay > 3h)
+    late_obs = Observation(
+        sensor_id=1,
+        observed_at=datetime(2024, 1, 1, 11, 0, tzinfo=UTC),
+        fetched_at=datetime(2024, 6, 1, 10, 0, tzinfo=UTC),
+        persisted_at=datetime(2024, 6, 1, 10, 1, tzinfo=UTC),
+        received_at=datetime(2024, 1, 1, 15, 0, tzinfo=UTC),
+        value=14.0,
+        unit="µg/m³",
+        quality_flag="VALID",
+        source_status="HEALTHY",
+        version=1,
+    )
+    populated_session.add_all([backfill_obs, late_obs])
+    populated_session.commit()
+
+    timeline = engine.build_replay_timeline(
+        sensor_id=1,
+        start_time=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
+        end_time=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
+        mode="retrospective",
+    )
+
+    t10 = timeline[timeline["observed_at"] == datetime(2024, 1, 1, 10, 0, tzinfo=UTC)].iloc[0]
+    # Backfill must NOT be classified as LATE! It is HEALTHY with backfill_lag_hours recorded.
+    assert t10["source_status"] == "HEALTHY"
+    assert pd.isna(t10["reporting_latency_hours"])
+    assert t10["backfill_lag_hours"] > 24.0
+
+    t11 = timeline[timeline["observed_at"] == datetime(2024, 1, 1, 11, 0, tzinfo=UTC)].iloc[0]
+    # Explicit 4h upstream publication delay correctly classified as LATE
+    assert t11["source_status"] == "LATE"
+    assert t11["reporting_latency_hours"] == 4.0
