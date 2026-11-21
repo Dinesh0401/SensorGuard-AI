@@ -10,9 +10,10 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from sensorguard.db.schema import Base, Observation, RawIngestBatch
+from sensorguard.db.schema import Base, ForecastFeatureSnapshot, Observation, RawIngestBatch
 from sensorguard.ingest import IngestionPipeline, ObservationValidator
 from sensorguard.providers import OpenAQClient
+from sensorguard.replay import PointInTimeReplayEngine
 
 
 @pytest.fixture
@@ -174,10 +175,12 @@ def test_idempotent_ingestion_and_exact_hash_provenance(test_db_session: Session
     assert res1.records_inserted == 1
     assert res1.records_deduplicated == 0
 
-    # Verify exact raw response hash provenance
+    # Verify exact raw response hash provenance across both text and raw bytes
     batch = test_db_session.scalars(select(RawIngestBatch)).first()
     assert batch is not None
     assert hashlib.sha256(batch.payload_json.encode("utf-8")).hexdigest() == batch.response_hash
+    assert batch.raw_bytes is not None
+    assert hashlib.sha256(batch.raw_bytes).hexdigest() == batch.response_hash
 
     # Exact duplicate run -> Deduplicated
     res2 = pipeline.ingest_sensor_hours(
@@ -257,3 +260,45 @@ def test_append_only_observation_revision_history(test_db_session: Session):
     assert obs_rows[1].version == 2
     assert obs_rows[1].value == 26.5
     assert obs_rows[1].persisted_at is not None
+
+
+def test_forecast_feature_snapshot_provenance(test_db_session: Session):
+    location_payload = {
+        "id": 7777,
+        "name": "Snapshot Test Station",
+        "coordinates": {"latitude": 51.5, "longitude": -0.1},
+        "country": {"code": "GB"},
+        "sensors": [{"id": 701, "parameter": {"name": "pm25", "units": "µg/m³"}}],
+    }
+    pipeline = IngestionPipeline(test_db_session)
+    _, sensors = pipeline.upsert_station_and_sensors(location_payload)
+    sensor = sensors[0]
+
+    engine = PointInTimeReplayEngine(test_db_session)
+    cutoff = datetime(2025, 3, 1, 12, 0, tzinfo=UTC)
+    features = {
+        "sensor_id": sensor.id,
+        "cutoff_time": cutoff.isoformat(),
+        "target_time": datetime(2025, 3, 1, 13, 0, tzinfo=UTC).isoformat(),
+        "last_observed_pm25": 14.5,
+        "age_hours": 0.5,
+        "status": "publish",
+    }
+
+    snapshot = engine.record_feature_snapshot(
+        sensor_id=sensor.id,
+        decision_cutoff=cutoff,
+        features=features,
+    )
+
+    assert snapshot.id is not None
+    assert snapshot.sensor_id == sensor.id
+    assert snapshot.decision_cutoff == cutoff
+
+    # Verify queryability from DB
+    persisted = test_db_session.scalars(
+        select(ForecastFeatureSnapshot).where(ForecastFeatureSnapshot.sensor_id == sensor.id)
+    ).first()
+    assert persisted is not None
+    assert persisted.feature_hash == snapshot.feature_hash
+    assert "14.5" in persisted.features_json
