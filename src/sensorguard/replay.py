@@ -23,7 +23,7 @@ import pandas as pd
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from sensorguard.db.schema import Observation
+from sensorguard.db.schema import ForecastFeatureSnapshot, Observation
 
 ReplayMode = Literal["prospective", "retrospective"]
 
@@ -303,6 +303,41 @@ class PointInTimeReplayEngine:
             "status": status,
             "status_reason": reason,
         }
+
+    def record_feature_snapshot(
+        self,
+        sensor_id: int,
+        decision_cutoff: datetime,
+        features: dict[str, Any],
+    ) -> ForecastFeatureSnapshot:
+        """Persist an immutable, cryptographic feature snapshot for served inference inputs."""
+        import hashlib
+        import json
+
+        cutoff_utc = (
+            decision_cutoff.astimezone(UTC) if decision_cutoff.tzinfo else decision_cutoff.replace(tzinfo=UTC)
+        )
+        target_str = features.get("target_time")
+        if target_str:
+            target_dt = datetime.fromisoformat(str(target_str))
+            target_utc = target_dt.astimezone(UTC) if target_dt.tzinfo else target_dt.replace(tzinfo=UTC)
+        else:
+            target_utc = cutoff_utc + timedelta(hours=1)
+
+        serialized = json.dumps(features, sort_keys=True)
+        feature_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+        snapshot = ForecastFeatureSnapshot(
+            sensor_id=sensor_id,
+            decision_cutoff=cutoff_utc,
+            target_time=target_utc,
+            features_json=serialized,
+            feature_hash=feature_hash,
+            created_at=datetime.now(UTC),
+        )
+        self.session.add(snapshot)
+        self.session.flush()
+        return snapshot
 
     def build_replay_timeline(
         self,
