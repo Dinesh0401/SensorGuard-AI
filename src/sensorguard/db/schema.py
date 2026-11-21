@@ -107,6 +107,12 @@ class RawIngestBatch(Base):
         nullable=False,
         index=True,
     )
+    persisted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
     response_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -143,6 +149,12 @@ class Observation(Base):
         nullable=False,
         index=True,
     )
+    persisted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
     value: Mapped[float | None] = mapped_column(Float, nullable=True)
     unit: Mapped[str] = mapped_column(String(32), nullable=False, default="µg/m³")
     quality_flag: Mapped[str] = mapped_column(String(32), nullable=False, default="VALID")
@@ -157,4 +169,5 @@ class Observation(Base):
         Index("ix_obs_sensor_observed_version", "sensor_id", "observed_at", "version"),
         Index("ix_obs_sensor_observed", "sensor_id", "observed_at"),
         Index("ix_obs_fetched_at", "fetched_at"),
+        Index("ix_obs_persisted_at", "persisted_at"),
     )

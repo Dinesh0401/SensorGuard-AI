@@ -170,8 +170,9 @@ class OpenAQClient:
                 response.raise_for_status()
                 # Record receipt timestamp when bytes have successfully arrived over the network:
                 fetched_at = datetime.now(UTC)
+                # Compute hash directly over raw HTTP response wire bytes (response.content)
+                payload_hash = hashlib.sha256(response.content).hexdigest()
                 raw_text = response.text
-                payload_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
                 payload = response.json()
 
                 if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):

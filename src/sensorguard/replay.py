@@ -83,6 +83,7 @@ class PointInTimeReplayEngine:
                 .where(
                     Observation.sensor_id.in_(sensor_ids),
                     Observation.fetched_at <= cutoff_utc,
+                    Observation.persisted_at <= cutoff_utc,
                     Observation.observed_at <= cutoff_utc,
                     Observation.observed_at <= Observation.fetched_at,
                 )
@@ -99,6 +100,7 @@ class PointInTimeReplayEngine:
                     Observation.period_end,
                     Observation.received_at,
                     Observation.fetched_at,
+                    Observation.persisted_at,
                     Observation.value,
                     Observation.unit,
                     Observation.quality_flag,
@@ -142,6 +144,7 @@ class PointInTimeReplayEngine:
                     Observation.period_end,
                     Observation.received_at,
                     Observation.fetched_at,
+                    Observation.persisted_at,
                     Observation.value,
                     Observation.unit,
                     Observation.quality_flag,
@@ -200,6 +203,7 @@ class PointInTimeReplayEngine:
                     "period_end": r.period_end,
                     "received_at": r.received_at,
                     "fetched_at": r.fetched_at,
+                    "persisted_at": r.persisted_at,
                     "value": r.value,
                     "unit": r.unit,
                     "quality_flag": r.quality_flag,
@@ -213,6 +217,7 @@ class PointInTimeReplayEngine:
 
         df["observed_at"] = pd.to_datetime(df["observed_at"], utc=True)
         df["fetched_at"] = pd.to_datetime(df["fetched_at"], utc=True)
+        df["persisted_at"] = pd.to_datetime(df["persisted_at"], utc=True)
 
         summary = ReplayCutoffSummary(
             decision_cutoff=cutoff_utc.isoformat(),
@@ -335,6 +340,8 @@ class PointInTimeReplayEngine:
                         "quality_flag": "MISSING_SLOT",
                         "source_status": "NO_REPORT",
                         "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                        "reporting_latency_hours": None,
+                        "backfill_lag_hours": None,
                     }
                 )
             return pd.DataFrame(timeline_records)
@@ -367,8 +374,26 @@ class PointInTimeReplayEngine:
                 else:
                     fetched = fetched.astimezone(UTC)
 
-                if (fetched - floor_h).total_seconds() > 3 * 3600 and status == "HEALTHY":
-                    status = "LATE"
+                # Reporting latency vs backfill ingestion lag:
+                received = row["received_at"]
+                if pd.notna(received):
+                    if hasattr(received, "to_pydatetime"):
+                        received = received.to_pydatetime()
+                    if received.tzinfo is None:
+                        received = received.replace(tzinfo=UTC)
+                    else:
+                        received = received.astimezone(UTC)
+                    reporting_latency_hours = max(0.0, (received - floor_h).total_seconds() / 3600.0)
+                    if reporting_latency_hours > 3.0 and status == "HEALTHY":
+                        status = "LATE"
+                else:
+                    reporting_latency_hours = None
+                    # When received_at is unavailable:
+                    # Distinguish near-real-time lag (<=24h) from historical backfill (>24h).
+                    # Historical backfills must NOT be falsely marked as LATE.
+                    backfill_lag = (fetched - floor_h).total_seconds() / 3600.0
+                    if 3.0 < backfill_lag <= 24.0 and status == "HEALTHY":
+                        status = "LATE"
 
                 timeline.append(
                     {
@@ -379,6 +404,8 @@ class PointInTimeReplayEngine:
                         "quality_flag": flag,
                         "source_status": status,
                         "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                        "reporting_latency_hours": reporting_latency_hours,
+                        "backfill_lag_hours": round(max(0.0, (fetched - floor_h).total_seconds() / 3600.0), 2),
                     }
                 )
             else:
@@ -391,6 +418,8 @@ class PointInTimeReplayEngine:
                         "quality_flag": "MISSING_SLOT",
                         "source_status": "NO_REPORT",
                         "age_hours": (end_utc - h).total_seconds() / 3600.0,
+                        "reporting_latency_hours": None,
+                        "backfill_lag_hours": None,
                     }
                 )
 

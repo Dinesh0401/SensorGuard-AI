@@ -8,6 +8,7 @@ observations idempotently.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -45,10 +46,13 @@ class ObservationValidator:
     """Validates raw sensor records and classifies data quality and availability."""
 
     @staticmethod
-    def normalize_unit(unit_str: str | None) -> str:
-        """Standardize PM2.5 unit representation."""
-        if not unit_str:
-            return CANONICAL_PM25_UNIT
+    def normalize_unit(unit_str: str | None) -> str | None:
+        """Standardize PM2.5 unit representation.
+
+        Returns None if unit is missing or empty, enforcing explicit rejection.
+        """
+        if not unit_str or not unit_str.strip():
+            return None
         cleaned = unit_str.strip()
         if cleaned in ACCEPTED_UNITS:
             return CANONICAL_PM25_UNIT
@@ -91,25 +95,49 @@ class ObservationValidator:
 
         # Value and unit
         raw_value = raw_record.get("value")
-        value: float | None = float(raw_value) if raw_value is not None else None
+        value: float | None = None
+        is_non_finite = False
+        if raw_value is not None:
+            try:
+                v = float(raw_value)
+                if math.isnan(v) or math.isinf(v):
+                    is_non_finite = True
+                else:
+                    value = v
+            except (ValueError, TypeError):
+                is_non_finite = True
 
         param_info = raw_record.get("parameter") or {}
-        raw_unit = param_info.get("units") or param_info.get("unit") or CANONICAL_PM25_UNIT
+        raw_unit = param_info.get("units") or param_info.get("unit")
         canonical_unit = cls.normalize_unit(raw_unit)
 
         # Validation logic
         quality_flag = "VALID"
         source_status = "HEALTHY"
 
-        if value is None:
+        if is_non_finite:
+            quality_flag = "NON_FINITE_VALUE"
+            source_status = "INVALID"
+            value = None
+            resolved_unit = canonical_unit or "UNKNOWN"
+        elif value is None:
             quality_flag = "MISSING_VALUE"
             source_status = "NO_REPORT"
-        elif value < PM25_MIN_VALID or value > PM25_MAX_VALID:
-            quality_flag = "OUT_OF_BOUNDS"
+            resolved_unit = canonical_unit or CANONICAL_PM25_UNIT
+        elif canonical_unit is None:
+            quality_flag = "MISSING_UNIT"
             source_status = "INVALID"
+            resolved_unit = "UNKNOWN"
         elif canonical_unit not in ACCEPTED_UNITS:
             quality_flag = "UNRECOGNIZED_UNIT"
             source_status = "INVALID"
+            resolved_unit = canonical_unit
+        elif value < PM25_MIN_VALID or value > PM25_MAX_VALID:
+            quality_flag = "OUT_OF_BOUNDS"
+            source_status = "INVALID"
+            resolved_unit = canonical_unit
+        else:
+            resolved_unit = canonical_unit
 
         return ValidatedRecord(
             sensor_id=sensor_db_id,
@@ -119,7 +147,7 @@ class ObservationValidator:
             received_at=received_at,
             fetched_at=fetched_at,
             value=value,
-            unit=canonical_unit,
+            unit=resolved_unit,
             quality_flag=quality_flag,
             source_status=source_status,
         )
@@ -277,12 +305,14 @@ class IngestionPipeline:
             results = resp.payload.get("results", [])
             result.records_fetched += len(results)
 
+            now_utc = datetime.now(UTC)
             # Store immutable raw batch preserving exact response text and hash
             raw_batch = RawIngestBatch(
                 provider="openaq",
                 endpoint=f"/v3/sensors/{provider_sensor_id}/hours",
                 params_json=json.dumps({"datetime_from": datetime_from, "datetime_to": datetime_to}),
                 fetched_at=resp.fetched_at,
+                persisted_at=now_utc,
                 status_code=200,
                 response_hash=resp.response_hash,
                 payload_json=resp.raw_text,
@@ -334,6 +364,7 @@ class IngestionPipeline:
                         period_end=val.period_end,
                         received_at=val.received_at,
                         fetched_at=val.fetched_at,
+                        persisted_at=now_utc,
                         value=val.value,
                         unit=val.unit,
                         quality_flag=val_flag,
@@ -364,6 +395,7 @@ class IngestionPipeline:
                             period_end=val.period_end,
                             received_at=val.received_at,
                             fetched_at=val.fetched_at,
+                            persisted_at=now_utc,
                             value=val.value,
                             unit=val.unit,
                             quality_flag=val_flag,
