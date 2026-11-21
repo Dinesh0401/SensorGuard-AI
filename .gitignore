@@ -11,6 +11,7 @@ dist/
 build/
 artifacts/
 mlruns/
+scratch/
 *.parquet
 *.db
 .DS_Store
