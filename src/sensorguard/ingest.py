@@ -306,7 +306,14 @@ class IngestionPipeline:
             result.records_fetched += len(results)
 
             now_utc = datetime.now(UTC)
-            # Store immutable raw batch preserving exact response text and hash
+            # Store immutable raw batch preserving exact response text, bytes, and cryptographic hash
+            raw_bytes = (
+                resp.raw_bytes
+                if (hasattr(resp, "raw_bytes") and resp.raw_bytes)
+                else resp.raw_text.encode("utf-8")
+                if resp.raw_text
+                else None
+            )
             raw_batch = RawIngestBatch(
                 provider="openaq",
                 endpoint=f"/v3/sensors/{provider_sensor_id}/hours",
@@ -316,6 +323,7 @@ class IngestionPipeline:
                 status_code=200,
                 response_hash=resp.response_hash,
                 payload_json=resp.raw_text,
+                raw_bytes=raw_bytes,
                 record_count=len(results),
             )
             self.session.add(raw_batch)
