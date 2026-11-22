@@ -10,11 +10,10 @@ from sensorguard.calibration import (
     AdaptiveConformalInference,
     ConformalizedQuantileRegression,
     RollingConformalCalibrator,
-    SplitConformalCalibrator,
     compute_interval_metrics,
     winkler_score,
 )
-from sensorguard.models.data import build_spatiotemporal_features, haversine_distance, partition_dataset
+from sensorguard.models.data import build_spatiotemporal_features, haversine_distance
 from sensorguard.models.forecasters import (
     LightGBMPointForecaster,
     LightGBMQuantileForecaster,
@@ -35,10 +34,12 @@ def test_haversine_distance_computation():
 
 
 def test_persistence_and_seasonal_naive_forecasters():
-    df = pd.DataFrame({
-        "last_pm25": [12.0, 15.0, 20.0],
-        "lag_24h": [10.0, np.nan, 18.0],
-    })
+    df = pd.DataFrame(
+        {
+            "last_pm25": [12.0, 15.0, 20.0],
+            "lag_24h": [10.0, np.nan, 18.0],
+        }
+    )
 
     p_model = PersistenceForecaster()
     p_pred = p_model.predict(df)
@@ -51,10 +52,12 @@ def test_persistence_and_seasonal_naive_forecasters():
 
 
 def test_spatial_neighbor_forecaster():
-    df = pd.DataFrame({
-        "last_pm25": [10.0, 20.0],
-        "neighbor_idw_pm25": [14.5, np.nan],
-    })
+    df = pd.DataFrame(
+        {
+            "last_pm25": [10.0, 20.0],
+            "neighbor_idw_pm25": [14.5, np.nan],
+        }
+    )
     model = SpatialNeighborForecaster()
     pred = model.predict(df)
     # First uses neighbor IDW, second falls back to last_pm25
@@ -65,12 +68,14 @@ def test_spatial_neighbor_forecaster():
 def test_ridge_and_lightgbm_point_forecasters():
     rng = np.random.default_rng(42)
     n = 100
-    X = pd.DataFrame({
-        "last_pm25": rng.uniform(5, 35, n),
-        "lag_1h": rng.uniform(5, 35, n),
-        "hour_sin": rng.uniform(-1, 1, n),
-        "hour_cos": rng.uniform(-1, 1, n),
-    })
+    X = pd.DataFrame(
+        {
+            "last_pm25": rng.uniform(5, 35, n),
+            "lag_1h": rng.uniform(5, 35, n),
+            "hour_sin": rng.uniform(-1, 1, n),
+            "hour_cos": rng.uniform(-1, 1, n),
+        }
+    )
     y = X["last_pm25"].to_numpy() + rng.normal(0, 1.0, n)
 
     ridge = RidgeForecaster()
@@ -91,16 +96,20 @@ def test_lightgbm_quantile_forecaster_and_cqr():
     n_train = 200
     n_test = 50
 
-    X_train = pd.DataFrame({
-        "last_pm25": rng.uniform(5, 30, n_train),
-        "hour_sin": rng.uniform(-1, 1, n_train),
-    })
+    X_train = pd.DataFrame(
+        {
+            "last_pm25": rng.uniform(5, 30, n_train),
+            "hour_sin": rng.uniform(-1, 1, n_train),
+        }
+    )
     y_train = X_train["last_pm25"].to_numpy() + rng.normal(0, 2.0, n_train)
 
-    X_test = pd.DataFrame({
-        "last_pm25": rng.uniform(5, 30, n_test),
-        "hour_sin": rng.uniform(-1, 1, n_test),
-    })
+    X_test = pd.DataFrame(
+        {
+            "last_pm25": rng.uniform(5, 30, n_test),
+            "hour_sin": rng.uniform(-1, 1, n_test),
+        }
+    )
     y_test = X_test["last_pm25"].to_numpy() + rng.normal(0, 2.0, n_test)
 
     q_model = LightGBMQuantileForecaster(n_estimators=15, quantiles=(0.05, 0.50, 0.95))
@@ -176,12 +185,14 @@ def test_no_target_leakage_in_spatiotemporal_features():
     records = []
     for s_id in ["st1", "st2"]:
         for i, t in enumerate(ts):
-            records.append({
-                "station_id": s_id,
-                "timestamp": t,
-                "pm25": float(10 + i * 2),
-                "reported": True,
-            })
+            records.append(
+                {
+                    "station_id": s_id,
+                    "timestamp": t,
+                    "pm25": float(10 + i * 2),
+                    "reported": True,
+                }
+            )
     df = pd.DataFrame(records)
     coords = {"st1": (51.5, -0.1), "st2": (51.6, -0.2)}
 
