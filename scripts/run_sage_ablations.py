@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run SAGE ablation experiments across sensitivity grids, policies, and feature subsets.
 
 Evaluates 5 pre-registered ablation conditions across 3 random seeds (11, 42, 107):

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run real-data forecasting and conformal uncertainty benchmarks on Q1 2024 pilot data.
 
 Evaluates point forecasters, split conformal prediction, CQR, and ACI across

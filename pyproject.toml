@@ -35,3 +35,6 @@ testpaths = ["tests"]
 line-length = 110
 target-version = "py311"
 exclude = [".venv", "scratch"]
+
+[tool.ruff.lint]
+ignore = ["EXE001"]
