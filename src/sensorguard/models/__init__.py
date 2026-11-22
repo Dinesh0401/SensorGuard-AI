@@ -11,6 +11,7 @@ from sensorguard.models.forecasters import (
     SeasonalNaiveForecaster,
     SpatialNeighborForecaster,
 )
+from sensorguard.models.sage import SAGEConfig, SAGEForecaster, SAGEResult, guarded_decision_rule
 
 __all__ = [
     "BaseForecaster",
@@ -18,6 +19,10 @@ __all__ = [
     "LightGBMQuantileForecaster",
     "PersistenceForecaster",
     "RidgeForecaster",
+    "SAGEConfig",
+    "SAGEForecaster",
+    "SAGEResult",
     "SeasonalNaiveForecaster",
     "SpatialNeighborForecaster",
+    "guarded_decision_rule",
 ]
