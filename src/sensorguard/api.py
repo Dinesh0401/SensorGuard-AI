@@ -24,8 +24,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
@@ -91,6 +89,15 @@ def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> Non
         )
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    """Ensure datetime has explicit UTC timezone info."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 # Global in-memory cache for trained SAGE model
 _CACHED_SAGE_MODEL: SAGEForecaster | None = None
 _CACHED_MODEL_LOAD_TIME: float = 0.0
@@ -141,7 +148,7 @@ def healthz(db: Session = Depends(get_db)) -> HealthResponse:
         stations_count = db.scalar(select(func.count(Station.id))) or 0
         obs_count = db.scalar(select(func.count(Observation.id))) or 0
         db_connected = True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - resilience diagnostic check
         logger.error("Database connection check failed: %s", e)
         stations_count = 0
         obs_count = 0
@@ -193,7 +200,8 @@ def list_stations(
     stations = db.scalars(stmt).all()
 
     # Determine reference max time in database to calculate honest staleness
-    max_db_time = db.scalar(select(func.max(Observation.observed_at))) or datetime.now(UTC)
+    max_db_raw = db.scalar(select(func.max(Observation.observed_at)))
+    max_db_time = _ensure_utc(max_db_raw) or datetime.now(UTC)
 
     station_summaries: list[StationSummary] = []
     for s in stations:
@@ -208,9 +216,9 @@ def list_stations(
         ).first()
 
         if latest_obs and latest_obs.observed_at:
-            obs_time = latest_obs.observed_at
+            obs_time = _ensure_utc(latest_obs.observed_at)
             val = latest_obs.value
-            age = max(0.0, (max_db_time - obs_time).total_seconds() / 3600.0)
+            age = max(0.0, (max_db_time - obs_time).total_seconds() / 3600.0) if obs_time else 0.0
             if age <= 3.0:
                 avail_status = "HEALTHY"
             elif age <= 12.0:
@@ -256,7 +264,9 @@ def get_station(station_id: int, db: Session = Depends(get_db)) -> StationSummar
     if not station:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found")
 
-    max_db_time = db.scalar(select(func.max(Observation.observed_at))) or datetime.now(UTC)
+    max_db_raw = db.scalar(select(func.max(Observation.observed_at)))
+    max_db_time = _ensure_utc(max_db_raw) or datetime.now(UTC)
+
     latest_obs = db.scalars(
         select(Observation)
         .join(Sensor, Sensor.id == Observation.sensor_id)
@@ -267,9 +277,9 @@ def get_station(station_id: int, db: Session = Depends(get_db)) -> StationSummar
     ).first()
 
     if latest_obs and latest_obs.observed_at:
-        obs_time = latest_obs.observed_at
+        obs_time = _ensure_utc(latest_obs.observed_at)
         val = latest_obs.value
-        age = max(0.0, (max_db_time - obs_time).total_seconds() / 3600.0)
+        age = max(0.0, (max_db_time - obs_time).total_seconds() / 3600.0) if obs_time else 0.0
         avail_status = "HEALTHY" if age <= 3.0 else ("LATE" if age <= 12.0 else "NO_REPORT")
         is_stale = age > 3.0
     else:
@@ -330,9 +340,9 @@ def get_station_observations(
 
     obs_records = [
         ObservationRecord(
-            observed_at=r.observed_at,
-            received_at=r.received_at,
-            fetched_at=r.fetched_at,
+            observed_at=_ensure_utc(r.observed_at) or r.observed_at,
+            received_at=_ensure_utc(r.received_at),
+            fetched_at=_ensure_utc(r.fetched_at) or r.fetched_at,
             value=r.value,
             unit=r.unit,
             quality_flag=r.quality_flag,
@@ -342,8 +352,10 @@ def get_station_observations(
         for r in rows
     ]
 
-    max_db_time = db.scalar(select(func.max(Observation.observed_at))) or datetime.now(UTC)
-    latest_ts = rows[0].observed_at if rows else None
+    max_db_raw = db.scalar(select(func.max(Observation.observed_at)))
+    max_db_time = _ensure_utc(max_db_raw) or datetime.now(UTC)
+
+    latest_ts = _ensure_utc(rows[0].observed_at) if rows else None
     if latest_ts:
         age = max(0.0, (max_db_time - latest_ts).total_seconds() / 3600.0)
         freshness = "fresh" if age <= 3.0 else ("moderate_delay" if age <= 12.0 else "stale")
@@ -406,7 +418,7 @@ def get_station_forecasts(
     age_hours_list = st_df["age_hours"].tolist()
 
     for idx in range(len(st_df)):
-        t_cutoff = timestamps[idx]
+        t_cutoff = _ensure_utc(timestamps[idx]) or timestamps[idx]
         t_target = t_cutoff + timedelta(hours=1)
         age = age_hours_list[idx]
 
@@ -480,18 +492,21 @@ def get_station_reliability(
             status_distribution={"NO_REPORT": 1},
         )
 
-    t_first = obs[0].observed_at
-    t_last = obs[-1].observed_at
-    total_hours = max(1, int((t_last - t_first).total_seconds() / 3600.0) + 1)
+    t_first = _ensure_utc(obs[0].observed_at)
+    t_last = _ensure_utc(obs[-1].observed_at)
+    total_hours = max(1, int((t_last - t_first).total_seconds() / 3600.0) + 1) if t_first and t_last else 1
     obs_count = len(obs)
     gap_pct = max(0.0, round((1.0 - (obs_count / total_hours)) * 100.0, 2))
 
     # Calculate longest consecutive outage gap
     longest_outage = 0.0
     for i in range(len(obs) - 1):
-        delta_h = (obs[i + 1].observed_at - obs[i].observed_at).total_seconds() / 3600.0
-        if delta_h > 1.5:
-            longest_outage = max(longest_outage, delta_h)
+        t1 = _ensure_utc(obs[i].observed_at)
+        t2 = _ensure_utc(obs[i + 1].observed_at)
+        if t1 and t2:
+            delta_h = (t2 - t1).total_seconds() / 3600.0
+            if delta_h > 1.5:
+                longest_outage = max(longest_outage, delta_h)
 
     # Status distribution
     status_dist: dict[str, int] = {}
@@ -514,8 +529,8 @@ def get_station_reliability(
                     "mpiw": m.get("mpiw"),
                     "winkler_score": m.get("winkler_score"),
                 }
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Failed reading benchmark metrics: %s", e)
 
     return StationReliabilityResponse(
         station_id=station.id,
@@ -562,8 +577,8 @@ def list_experiments() -> ExperimentListResponse:
                     scenarios_evaluated=list(b.get("scenarios", {}).keys()),
                 )
             )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not parse benchmark file: %s", e)
 
     # 2. Milestone 4 SAGE Ablation Study
     ablation_file = Path("docs/audit/sage_ablation_results.json")
@@ -580,8 +595,8 @@ def list_experiments() -> ExperimentListResponse:
                     scenarios_evaluated=a.get("scenarios", []),
                 )
             )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not parse ablation file: %s", e)
 
     # 3. Synthetic Controlled Simulator
     experiments.append(
@@ -618,8 +633,8 @@ def get_experiment_detail(experiment_id: str) -> ExperimentDetailResponse:
                     title="Milestone 3: Spatiotemporal Forecasters & Conformal Calibration",
                     details=b,
                 )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not parse benchmark file: %s", e)
 
     ablation_file = Path("docs/audit/sage_ablation_results.json")
     if ablation_file.exists():
@@ -631,8 +646,8 @@ def get_experiment_detail(experiment_id: str) -> ExperimentDetailResponse:
                     title="Milestone 4: SAGE Sensitivity & Guarded Policy Ablation Study",
                     details=a,
                 )
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not parse ablation file: %s", e)
 
     if experiment_id == "SG-SIM-SYNTHETIC":
         demo_res = run_experiment(ExperimentConfig(outage=OutageConfig(mechanism="mnar", seed=42)))
@@ -679,7 +694,6 @@ def admin_ingest(
 ) -> AdminIngestResponse:
     """Protected administrative ingestion endpoint with bounded lookback limits."""
     t0 = time.time()
-    # Count current observations
     cnt_before = db.scalar(select(func.count(Observation.id))) or 0
     duration = round(time.time() - t0, 3)
 

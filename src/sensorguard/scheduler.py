@@ -13,6 +13,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -76,7 +77,7 @@ class IngestScheduler:
         stations = session.scalars(select(Station)).all()
         now_utc = datetime.now(UTC)
 
-        summary = {
+        summary: dict[str, Any] = {
             "total_stations": len(stations),
             "healthy": 0,
             "late": 0,
@@ -95,7 +96,10 @@ class IngestScheduler:
             ).first()
 
             if latest_obs and latest_obs.observed_at:
-                age = max(0.0, (now_utc - latest_obs.observed_at).total_seconds() / 3600.0)
+                obs_time = latest_obs.observed_at
+                if obs_time.tzinfo is None:
+                    obs_time = obs_time.replace(tzinfo=UTC)
+                age = max(0.0, (now_utc - obs_time).total_seconds() / 3600.0)
                 if age <= 3.0:
                     status = "HEALTHY"
                     summary["healthy"] += 1
@@ -139,7 +143,7 @@ class IngestScheduler:
                     freshness["no_report"],
                 )
                 return freshness
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - scheduler must log and remain resilient
                 self._last_poll_status = f"FAILED: {e}"
                 logger.error("Scheduled polling failed: %s", e)
                 return {"error": str(e), "status": "FAILED"}
