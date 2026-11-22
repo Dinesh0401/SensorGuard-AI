@@ -15,10 +15,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from sensorguard.api import ADMIN_API_KEY, app
+from sensorguard.api import app
 from sensorguard.scheduler import IngestScheduler, SchedulerConfig
 
 client = TestClient(app)
+TEST_ADMIN_KEY = "sensorguard-test-admin-secret-42"
 
 
 def test_health_and_healthz():
@@ -53,6 +54,7 @@ def test_list_stations():
         assert "status" in st
         assert st["status"] in {"HEALTHY", "LATE", "NO_REPORT", "OFFLINE_CONFIRMED"}
         assert "is_stale" in st
+        assert st["is_archived_pilot"] is True
 
 
 def test_list_stations_bbox_filter():
@@ -66,6 +68,10 @@ def test_list_stations_bbox_filter():
     # Invalid bbox format
     res_bad = client.get("/api/v1/stations?bbox=invalid,bbox")
     assert res_bad.status_code == 400
+
+    # Out of range bbox
+    res_out = client.get("/api/v1/stations?bbox=-200,51,0,52")
+    assert res_out.status_code == 400
 
 
 def test_get_station_detail():
@@ -170,12 +176,26 @@ def test_research_experiments():
     assert "research_caveats" in detail
 
 
-def test_admin_auth_and_endpoints():
-    """Verify administrative authorization and protected execution."""
-    # 1. Missing header -> 422
+def test_admin_auth_and_endpoints(monkeypatch: pytest.MonkeyPatch):
+    """Verify administrative authorization, fail-closed security, and protected execution."""
+    # 1. Unconfigured admin key -> 503 fail closed
+    monkeypatch.delenv("ADMIN_API_KEY", raising=False)
+    assert (
+        client.post(
+            "/api/v1/admin/ingest",
+            json={"days": 1},
+            headers={"X-Admin-Key": "some-random-key"},
+        ).status_code
+        == 503
+    )
+
+    # Configure valid key in test environment
+    monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
+
+    # 2. Missing header -> 422
     assert client.post("/api/v1/admin/ingest", json={"days": 1}).status_code == 422
 
-    # 2. Invalid header -> 401
+    # 3. Invalid header -> 401
     assert (
         client.post(
             "/api/v1/admin/ingest",
@@ -185,20 +205,20 @@ def test_admin_auth_and_endpoints():
         == 401
     )
 
-    # 3. Valid key -> 200
+    # 4. Valid key -> 200
     res_ingest = client.post(
         "/api/v1/admin/ingest",
         json={"days": 7},
-        headers={"X-Admin-Key": ADMIN_API_KEY},
+        headers={"X-Admin-Key": TEST_ADMIN_KEY},
     )
     assert res_ingest.status_code == 200
     assert res_ingest.json()["status"] == "completed"
 
-    # 4. Admin evaluate endpoint
+    # 5. Admin evaluate endpoint
     res_eval = client.post(
         "/api/v1/admin/evaluate",
         json={"scenario": "natural", "nominal_coverage": 0.90},
-        headers={"X-Admin-Key": ADMIN_API_KEY},
+        headers={"X-Admin-Key": TEST_ADMIN_KEY},
     )
     assert res_eval.status_code == 200
     assert res_eval.json()["scenario"] == "natural"

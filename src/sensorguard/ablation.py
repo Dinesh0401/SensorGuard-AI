@@ -10,7 +10,6 @@ Evaluates 5 pre-registered ablation conditions across 3 random seeds (11, 42, 10
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -19,7 +18,11 @@ import numpy as np
 import pandas as pd
 
 from sensorguard.calibration import compute_interval_metrics
-from sensorguard.models.data import DatasetSplits
+from sensorguard.models.data import (
+    DatasetSplits,
+    compute_dataset_content_hash,
+    haversine_distance,
+)
 from sensorguard.models.sage import SAGEConfig, SAGEForecaster
 
 logger = logging.getLogger(__name__)
@@ -42,8 +45,15 @@ def prepare_scenario_test_data(
     seed: int,
     train_mean: float,
     train_std: float,
+    station_coords: dict[str, tuple[float, float]] | None = None,
+    history_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    """Generate masked test data strictly preserving ground truth in separate array."""
+    """Generate masked test data strictly preserving ground truth in separate array.
+
+    When an outage occurs, all dependent features (last_pm25, lag_1h, lag_2h, lag_24h,
+    rolling statistics, age_hours, and neighbor_idw_pm25) are strictly rebuilt
+    from the masked observation timeline to prevent any lookahead or feature leakage.
+    """
     scenario_test = test_df.copy()
     y_ground_truth = scenario_test["target"].to_numpy().copy()
 
@@ -51,21 +61,19 @@ def prepare_scenario_test_data(
         return scenario_test, y_ground_truth
 
     rng = np.random.default_rng(seed)
+    n = len(scenario_test)
+    outage_mask = np.zeros(n, dtype=bool)
 
     if scenario == "mcar_20":
         # 20% Missing Completely at Random
-        mask = rng.uniform(size=len(scenario_test)) < 0.20
-        scenario_test.loc[mask, "last_pm25"] = scenario_test.loc[mask, "lag_1h"]
-        scenario_test.loc[mask, "age_hours"] = scenario_test.loc[mask, "age_hours"] + 1.0
+        outage_mask = rng.uniform(size=n) < 0.20
 
     elif scenario == "mnar_gamma_1.5":
         # Nonrandom failure probability depends on hidden target value
         gamma = 1.5
-        z = (scenario_test["target"].to_numpy() - train_mean) / (train_std + 1e-6)
+        z = (y_ground_truth - train_mean) / (train_std + 1e-6)
         probs = 1.0 / (1.0 + np.exp(-(gamma * z - 1.2)))
-        mask = rng.uniform(size=len(scenario_test)) < probs
-        scenario_test.loc[mask, "last_pm25"] = scenario_test.loc[mask, "lag_1h"]
-        scenario_test.loc[mask, "age_hours"] = scenario_test.loc[mask, "age_hours"] + 1.0
+        outage_mask = rng.uniform(size=n) < probs
 
     elif scenario == "burst_24h":
         # Contiguous 24-hour regional/station failure
@@ -73,15 +81,114 @@ def prepare_scenario_test_data(
         target_st = st_ids[0]
         t_min = scenario_test["timestamp"].min() + pd.Timedelta(days=5)
         t_max = t_min + pd.Timedelta(hours=24)
-        mask = (
+        outage_mask = (
             (scenario_test["station_id"] == target_st)
             & (scenario_test["timestamp"] >= t_min)
             & (scenario_test["timestamp"] < t_max)
-        )
-        scenario_test.loc[mask, "last_pm25"] = scenario_test.loc[mask, "lag_24h"]
-        scenario_test.loc[mask, "age_hours"] = 24.0
+        ).to_numpy()
 
-    return scenario_test, y_ground_truth
+    # Apply outage mask: marked observations did not arrive
+    scenario_test["is_outage"] = outage_mask
+
+    # Rebuild spatiotemporal features per station strictly from visible measurements
+    all_stations = sorted(scenario_test["station_id"].unique())
+    rebuilt_frames = []
+
+    for s_id in all_stations:
+        st_test = scenario_test[scenario_test["station_id"] == s_id].sort_values("timestamp").copy()
+
+        # If history is available for this station, prepend for warmup continuity
+        if history_df is not None and not history_df.empty:
+            st_hist = history_df[history_df["station_id"] == s_id].sort_values("timestamp").copy()
+            st_hist["is_outage"] = False
+            combined = pd.concat([st_hist, st_test], ignore_index=True)
+            n_hist = len(st_hist)
+        else:
+            combined = st_test
+            n_hist = 0
+
+        # Visible observations: reported AND not under outage
+        is_reported = combined["reported"].infer_objects(copy=False).fillna(False).astype(bool) & (
+            ~combined["is_outage"]
+        )
+        visible_series = combined["target"].where(is_reported)
+
+        last_val = visible_series.ffill().shift(1)
+        combined["last_pm25"] = last_val.fillna(combined["last_pm25"])
+        combined["lag_1h"] = visible_series.ffill().shift(2).fillna(combined["lag_1h"])
+        combined["lag_2h"] = visible_series.ffill().shift(3).fillna(combined["lag_2h"])
+        combined["lag_24h"] = visible_series.ffill().shift(24).fillna(combined["lag_24h"])
+
+        combined["rolling_mean_6h"] = combined["last_pm25"].rolling(6, min_periods=1).mean()
+        combined["rolling_std_6h"] = combined["last_pm25"].rolling(6, min_periods=2).std().fillna(0.0)
+        combined["rolling_mean_24h"] = combined["last_pm25"].rolling(24, min_periods=1).mean()
+
+        visible_time = combined["timestamp"].where(is_reported)
+        last_time = visible_time.ffill().shift(1)
+        calc_age = (combined["timestamp"] - last_time).dt.total_seconds() / 3600.0
+        combined["age_hours"] = calc_age.fillna(combined["age_hours"] + 1.0)
+
+        # Slice back the test portion
+        res_test = combined.iloc[n_hist:].copy()
+        rebuilt_frames.append(res_test)
+
+    rebuilt_df = (
+        pd.concat(rebuilt_frames, ignore_index=True)
+        .sort_values(["timestamp", "station_id"])
+        .reset_index(drop=True)
+    )
+
+    # Recompute neighbor inverse-distance weighting with masked values and ages
+    if station_coords and len(all_stations) > 1:
+        dist_matrix: dict[tuple[str, str], float] = {}
+        for s1 in all_stations:
+            for s2 in all_stations:
+                if s1 != s2 and s1 in station_coords and s2 in station_coords:
+                    d = haversine_distance(
+                        station_coords[s1][0],
+                        station_coords[s1][1],
+                        station_coords[s2][0],
+                        station_coords[s2][1],
+                    )
+                    dist_matrix[(s1, s2)] = max(d, 0.5)
+
+        pivoted_last = rebuilt_df.pivot(index="timestamp", columns="station_id", values="last_pm25")
+        pivoted_age = rebuilt_df.pivot(index="timestamp", columns="station_id", values="age_hours")
+
+        idw_values = []
+        for row in rebuilt_df.itertuples():
+            t = row.timestamp
+            s_id = row.station_id
+            weights = []
+            vals = []
+            for other_id in all_stations:
+                if other_id != s_id and (s_id, other_id) in dist_matrix:
+                    other_val = pivoted_last.at[t, other_id]
+                    other_age = pivoted_age.at[t, other_id]
+                    if pd.notna(other_val) and pd.notna(other_age) and other_age <= 3.0:
+                        d = dist_matrix[(s_id, other_id)]
+                        w = 1.0 / (d**2.0)
+                        weights.append(w)
+                        vals.append(other_val)
+            if weights:
+                idw = sum(w * v for w, v in zip(weights, vals)) / sum(weights)
+            else:
+                idw = row.last_pm25
+            idw_values.append(idw)
+        rebuilt_df["neighbor_idw_pm25"] = idw_values
+    else:
+        if "neighbor_idw_pm25" in rebuilt_df.columns:
+            rebuilt_df["neighbor_idw_pm25"] = rebuilt_df["last_pm25"]
+
+    rebuilt_df = rebuilt_df.drop(columns=["is_outage"], errors="ignore")
+
+    # Match original row ordering of test_df
+    final_df = scenario_test[["station_id", "timestamp"]].merge(
+        rebuilt_df, on=["station_id", "timestamp"], how="left"
+    )
+    final_ground_truth = final_df["target"].to_numpy().copy()
+
+    return final_df, final_ground_truth
 
 
 def build_ablation_model(
@@ -171,9 +278,7 @@ def run_sage_ablation_suite(
     train_mean = float(train_df["target"].mean())
     train_std = float(train_df["target"].std())
 
-    data_hash = hashlib.sha256(
-        (str(len(train_df)) + str(len(cal_df)) + str(len(test_df))).encode("utf-8")
-    ).hexdigest()[:16]
+    data_hash = compute_dataset_content_hash(splits)
 
     logger.info("Initializing models for %d ablation conditions...", len(ABLATION_CONDITIONS))
     models: dict[str, SAGEForecaster] = {}
@@ -204,6 +309,8 @@ def run_sage_ablation_suite(
                 seed=seed,
                 train_mean=train_mean,
                 train_std=train_std,
+                station_coords=splits.station_coords,
+                history_df=cal_df.tail(48),
             )
 
             # Subgroup strata for group fairness
@@ -225,41 +332,34 @@ def run_sage_ablation_suite(
                 model = models[cond]
                 res = model.predict_guarded(scen_test)
 
-                # Compute baseline interval metrics across all samples
+                # Compute baseline interval metrics across unified valid evaluation mask
                 m = compute_interval_metrics(
                     y_true=y_truth,
                     y_pred=res.point_forecast,
                     lower=res.lower_envelope,
                     upper=res.upper_envelope,
                     alpha=alpha,
+                    is_published=res.is_published,
                     strata_labels=strata,
                 )
-
-                # Abstention evaluation
-                pub_mask = res.is_published
-                abstention_rate = float((~pub_mask).mean())
-                if pub_mask.any():
-                    pub_cov = float(
-                        (
-                            (y_truth[pub_mask] >= res.lower_envelope[pub_mask])
-                            & (y_truth[pub_mask] <= res.upper_envelope[pub_mask])
-                        ).mean()
-                    )
-                else:
-                    pub_cov = None
 
                 record = {
                     "seed": seed,
                     "scenario": scen,
                     "condition": cond,
+                    "n_total": m["n_total"],
+                    "n_valid_eval": m["n_valid_eval"],
+                    "n_published": m["n_published"],
+                    "n_abstained": m["n_abstained"],
                     "mae": m["mae"],
                     "rmse": m["rmse"],
                     "picp": m["picp"],
-                    "published_picp": pub_cov,
+                    "overall_picp": m["overall_picp"],
+                    "published_picp": m["published_picp"],
                     "mpiw": m["mpiw"],
                     "winkler_score": m["winkler_score"],
                     "worst_stratum_coverage_gap": m["worst_stratum_coverage_gap"],
-                    "abstention_rate": abstention_rate,
+                    "abstention_rate": m["abstention_rate"],
                     "effective_sample_size": float(res.effective_sample_size),
                     "mean_disagreement": float(np.mean(res.scenario_disagreement)),
                 }
@@ -278,12 +378,16 @@ def run_sage_ablation_suite(
                 "mae",
                 "rmse",
                 "picp",
+                "overall_picp",
                 "published_picp",
                 "mpiw",
                 "winkler_score",
                 "worst_stratum_coverage_gap",
                 "abstention_rate",
                 "mean_disagreement",
+                "n_valid_eval",
+                "n_published",
+                "n_abstained",
             ]:
                 vals = sub[col].dropna()
                 agg_entry[f"{col}_mean"] = round(float(vals.mean()), 4) if len(vals) > 0 else None

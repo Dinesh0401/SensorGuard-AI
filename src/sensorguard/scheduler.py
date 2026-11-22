@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,8 @@ from sqlalchemy.orm import Session
 
 from sensorguard.db.schema import Observation, Sensor, Station
 from sensorguard.db.session import create_db_engine, get_session_factory
+from sensorguard.ingest import OpenAQIngestionPipeline
+from sensorguard.providers import OpenAQClient
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +36,16 @@ class SchedulerConfig:
         max_retries: Maximum exponential backoff retries on provider failure.
         backoff_factor_seconds: Initial backoff base in seconds.
         max_batch_size: Maximum records requested per station cycle.
+        enabled: Whether automated background scheduling is active (default False).
+        fetch_live_provider: Whether to query upstream OpenAQ API (default False).
     """
 
     poll_interval_seconds: int = 3600
     max_retries: int = 3
     backoff_factor_seconds: float = 2.0
     max_batch_size: int = 100
+    enabled: bool = False
+    fetch_live_provider: bool = False
 
 
 class IngestScheduler:
@@ -49,7 +56,10 @@ class IngestScheduler:
         config: SchedulerConfig | None = None,
         session_factory=None,
     ) -> None:
-        self.config = config or SchedulerConfig()
+        self.config = config or SchedulerConfig(
+            enabled=os.getenv("ENABLE_INGEST_SCHEDULER", "false").lower() in ("1", "true"),
+            fetch_live_provider=os.getenv("ENABLE_LIVE_PROVIDER_FETCH", "false").lower() in ("1", "true"),
+        )
         if session_factory is None:
             engine = create_db_engine()
             self.session_factory = get_session_factory(engine)
@@ -59,6 +69,7 @@ class IngestScheduler:
         self._is_running: bool = False
         self._last_poll_time: datetime | None = None
         self._last_poll_status: str = "IDLE"
+        self._poll_lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -126,27 +137,75 @@ class IngestScheduler:
         return summary
 
     async def poll_once(self) -> dict[str, Any]:
-        """Execute a single bounded polling cycle across the pilot network."""
-        now_utc = datetime.now(UTC)
-        logger.info("Executing scheduled ingestion poll at %s...", now_utc.isoformat())
+        """Execute a single bounded polling cycle across the pilot network.
 
-        with self.session_factory() as session:
-            try:
-                freshness = self.check_network_freshness(session)
-                self._last_poll_time = now_utc
-                self._last_poll_status = "SUCCESS"
-                logger.info(
-                    "Network audit: %d stations (%d healthy, %d late, %d no_report)",
-                    freshness["total_stations"],
-                    freshness["healthy"],
-                    freshness["late"],
-                    freshness["no_report"],
-                )
-                return freshness
-            except Exception as e:  # noqa: BLE001 - scheduler must log and remain resilient
-                self._last_poll_status = f"FAILED: {e}"
-                logger.error("Scheduled polling failed: %s", e)
-                return {"error": str(e), "status": "FAILED"}
+        Guards against duplicate polling workers and optionally retrieves
+        bounded upstream observations if live provider fetching is configured.
+        """
+        if self._poll_lock.locked():
+            logger.warning("Scheduled poll cycle already running; skipping duplicate invocation.")
+            return {"status": "SKIPPED_DUPLICATE", "message": "Prior poll active"}
+
+        async with self._poll_lock:
+            now_utc = datetime.now(UTC)
+            logger.info("Executing scheduled ingestion poll at %s...", now_utc.isoformat())
+
+            with self.session_factory() as session:
+                try:
+                    freshness = self.check_network_freshness(session)
+                    records_ingested = 0
+                    provider_notes = "Audit freshness completed."
+
+                    if self.config.fetch_live_provider:
+                        api_key = os.getenv("OPENAQ_API_KEY")
+                        if api_key:
+                            try:
+                                client = OpenAQClient(api_key=api_key)
+                                pipeline = OpenAQIngestionPipeline(session)
+                                sensors = session.scalars(
+                                    select(Sensor).where(Sensor.parameter == "pm25")
+                                ).all()
+                                for s in sensors:
+                                    res = pipeline.ingest_sensor_hours(
+                                        sensor_db_id=s.id,
+                                        provider_sensor_id=s.provider_sensor_id,
+                                        client=client,
+                                        max_pages=1,
+                                        page_size=self.config.max_batch_size,
+                                    )
+                                    records_ingested += res.records_persisted
+                                session.commit()
+                                provider_notes = f"Ingested {records_ingested} new observations."
+                            except Exception as pe:  # noqa: BLE001
+                                logger.warning("Live provider retrieval failed gracefully: %s", pe)
+                                provider_notes = f"Live provider pull skipped: {pe}"
+                        else:
+                            provider_notes = (
+                                "Live fetch requested but OPENAQ_API_KEY unconfigured; ran audit only."
+                            )
+
+                    self._last_poll_time = now_utc
+                    self._last_poll_status = "SUCCESS"
+                    logger.info(
+                        "Network audit: %d stations (%d healthy, %d late, %d no_report) - %s",
+                        freshness["total_stations"],
+                        freshness["healthy"],
+                        freshness["late"],
+                        freshness["no_report"],
+                        provider_notes,
+                    )
+                    return {
+                        "status": "SUCCESS",
+                        "timestamp": now_utc.isoformat(),
+                        "records_ingested": records_ingested,
+                        "provider_notes": provider_notes,
+                        "freshness": freshness,
+                        "total_stations": freshness["total_stations"],
+                    }
+                except Exception as e:  # noqa: BLE001 - scheduler must log and remain resilient
+                    self._last_poll_status = f"FAILED: {e}"
+                    logger.error("Scheduled polling failed: %s", e)
+                    return {"error": str(e), "status": "FAILED"}
 
     async def run_loop(self, max_cycles: int | None = None) -> None:
         """Run continuous asynchronous polling loop with bounded cycles for testing."""

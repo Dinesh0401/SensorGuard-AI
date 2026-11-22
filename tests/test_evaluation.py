@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from sensorguard.calibration import compute_interval_metrics
 from sensorguard.evaluation import run_benchmark_suite
 from sensorguard.models.data import partition_dataset
 
@@ -86,3 +87,32 @@ def test_run_benchmark_suite_smoke():
     assert "persistence" in results["scenarios"]["natural"]
     assert "lightgbm_quantile" in results["scenarios"]["natural"]
     assert "lightgbm_aci" in results["scenarios"]["natural"]
+
+
+def test_compute_interval_metrics_unified_denominator():
+    """Verify unified evaluation mask and published coverage equality under no abstention."""
+    y_true = np.array([10.0, 20.0, 30.0, 40.0, np.nan])
+    y_pred = np.array([11.0, 19.0, 31.0, 42.0, 15.0])
+    lower = np.array([8.0, 15.0, 25.0, 35.0, 10.0])
+    upper = np.array([12.0, 25.0, 35.0, 45.0, 20.0])
+
+    # Case 1: All published
+    m_all = compute_interval_metrics(y_true, y_pred, lower, upper, alpha=0.10)
+    assert m_all["n_total"] == 5
+    assert m_all["n_valid_eval"] == 4
+    assert m_all["n_published"] == 4
+    assert m_all["n_abstained"] == 0
+    assert m_all["abstention_rate"] == 0.0
+    assert m_all["picp"] == 1.0
+    assert m_all["published_picp"] == 1.0
+
+    # Case 2: Partial abstention
+    # row 3 (val=40, bounds=[35,45]) is covered, but abstained
+    is_pub = np.array([True, True, True, False, True])
+    m_part = compute_interval_metrics(y_true, y_pred, lower, upper, alpha=0.10, is_published=is_pub)
+    assert m_part["n_valid_eval"] == 4
+    assert m_part["n_published"] == 3
+    assert m_part["n_abstained"] == 1
+    assert m_part["abstention_rate"] == 0.25
+    assert m_part["picp"] == 1.0
+    assert m_part["published_picp"] == 1.0

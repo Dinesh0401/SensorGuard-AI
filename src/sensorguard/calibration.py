@@ -195,34 +195,76 @@ def compute_interval_metrics(
     lower: np.ndarray,
     upper: np.ndarray,
     alpha: float = 0.10,
+    is_published: np.ndarray | None = None,
     strata_labels: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
-    """Compute comprehensive accuracy, calibration, sharpness, and group fairness metrics."""
+    """Compute comprehensive accuracy, calibration, sharpness, and group fairness metrics.
+
+    Uses a single unified evaluation mask across all candidate observations:
+    valid_mask = isfinite(y) & isfinite(y_pred) & isfinite(lower) & isfinite(upper).
+
+    When is_published is provided:
+    - overall_picp / picp: coverage over all valid evaluation rows.
+    - published_picp: coverage strictly over valid evaluation rows where is_published is True.
+    - When all forecasts are published (no_abstention), published_picp strictly equals overall_picp.
+    """
     y = np.asarray(y_true, dtype=float)
     p = np.asarray(y_pred, dtype=float)
     l_arr = np.asarray(lower, dtype=float)
     u_arr = np.asarray(upper, dtype=float)
 
+    n_total = len(y)
+    n_valid_target = int(np.isfinite(y).sum())
+    n_valid_forecast = int((np.isfinite(p) & np.isfinite(l_arr) & np.isfinite(u_arr)).sum())
+
     valid_mask = np.isfinite(y) & np.isfinite(p) & np.isfinite(l_arr) & np.isfinite(u_arr)
+    n_valid_eval = int(valid_mask.sum())
+
+    if is_published is not None:
+        pub_arr = np.asarray(is_published, dtype=bool)
+    else:
+        pub_arr = np.ones(n_total, dtype=bool)
+
     if not valid_mask.any():
         return {
+            "n_total": n_total,
+            "n_valid_target": n_valid_target,
+            "n_valid_forecast": n_valid_forecast,
+            "n_valid_eval": 0,
             "n_samples": 0,
+            "n_published": 0,
+            "n_abstained": 0,
+            "abstention_rate": 0.0,
             "mae": None,
             "rmse": None,
             "picp": None,
+            "overall_picp": None,
+            "published_picp": None,
+            "coverage_gap": None,
             "mpiw": None,
             "winkler_score": None,
             "worst_stratum_coverage_gap": None,
+            "strata": {},
         }
 
     y_val = y[valid_mask]
     p_val = p[valid_mask]
     l_val = l_arr[valid_mask]
     u_val = u_arr[valid_mask]
+    pub_val = pub_arr[valid_mask]
+
+    n_published = int(pub_val.sum())
+    n_abstained = int((~pub_val).sum())
+    abstention_rate = float((~pub_val).mean())
 
     covered = (y_val >= l_val) & (y_val <= u_val)
-    picp = float(covered.mean())
+    overall_picp = float(covered.mean())
     nominal_coverage = 1.0 - alpha
+
+    if n_published > 0:
+        published_picp = float(covered[pub_val].mean())
+    else:
+        published_picp = None
 
     mae = float(np.mean(np.abs(y_val - p_val)))
     rmse = float(np.sqrt(np.mean((y_val - p_val) ** 2)))
@@ -250,11 +292,20 @@ def compute_interval_metrics(
                     }
 
     return {
-        "n_samples": int(valid_mask.sum()),
+        "n_total": n_total,
+        "n_valid_target": n_valid_target,
+        "n_valid_forecast": n_valid_forecast,
+        "n_valid_eval": n_valid_eval,
+        "n_samples": n_valid_eval,
+        "n_published": n_published,
+        "n_abstained": n_abstained,
+        "abstention_rate": round(abstention_rate, 4),
         "mae": round(mae, 4),
         "rmse": round(rmse, 4),
-        "picp": round(picp, 4),
-        "coverage_gap": round(abs(picp - nominal_coverage), 4),
+        "picp": round(overall_picp, 4),
+        "overall_picp": round(overall_picp, 4),
+        "published_picp": round(published_picp, 4) if published_picp is not None else None,
+        "coverage_gap": round(abs(overall_picp - nominal_coverage), 4),
         "mpiw": round(mpiw, 4),
         "winkler_score": round(winkler, 4),
         "worst_stratum_coverage_gap": round(worst_gap, 4),

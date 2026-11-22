@@ -136,3 +136,64 @@ def test_run_sage_ablation_suite_deterministic(mock_dataset_splits: DatasetSplit
     assert "natural" in summary["aggregates"]
     assert "full_sage" in summary["aggregates"]["natural"]
     assert summary["aggregates"]["natural"]["full_sage"]["picp_mean"] is not None
+
+
+def test_no_abstention_coverage_invariant(mock_dataset_splits: DatasetSplits) -> None:
+    """Mathematical invariant: when no abstention policy is active, published coverage strictly equals overall coverage."""
+    summary = run_sage_ablation_suite(
+        splits=mock_dataset_splits,
+        seeds=[42],
+        nominal_coverage=0.90,
+        track_mlflow=False,
+    )
+    for scen in summary["scenarios"]:
+        no_abs = summary["aggregates"][scen]["no_abstention"]
+        assert no_abs["abstention_rate_mean"] == 0.0
+        assert no_abs["published_picp_mean"] is not None
+        assert no_abs["picp_mean"] is not None
+        assert abs(no_abs["published_picp_mean"] - no_abs["picp_mean"]) < 1e-6
+
+
+def test_masked_features_recomputed_no_leakage(mock_dataset_splits: DatasetSplits) -> None:
+    """Verify that simulated outages strictly rebuild dependent features without ground-truth leakage."""
+    test_df = mock_dataset_splits.test
+    train_mean = float(mock_dataset_splits.train["target"].mean())
+    train_std = float(mock_dataset_splits.train["target"].std())
+
+    # Burst outage at station st_1
+    scen_df, y_truth = prepare_scenario_test_data(
+        test_df,
+        "burst_24h",
+        seed=42,
+        train_mean=train_mean,
+        train_std=train_std,
+        station_coords=mock_dataset_splits.station_coords,
+    )
+    assert len(scen_df) == len(y_truth)
+
+    # Check that age_hours reflects outage for the target station
+    assert (scen_df["age_hours"] >= 1.0).all()
+    # Ground truth array strictly retains original target
+    assert np.array_equal(test_df["target"].to_numpy(), y_truth)
+
+
+def test_content_hash_deterministic(mock_dataset_splits: DatasetSplits) -> None:
+    """Verify dataset content fingerprint is deterministic and sensitive to content modifications."""
+    from sensorguard.models.data import compute_dataset_content_hash
+
+    hash1 = compute_dataset_content_hash(mock_dataset_splits)
+    hash2 = compute_dataset_content_hash(mock_dataset_splits)
+    assert hash1 == hash2
+    assert len(hash1) == 16
+
+    # Modify a single target value
+    modified_splits = DatasetSplits(
+        train=mock_dataset_splits.train.copy(),
+        calibrate=mock_dataset_splits.calibrate.copy(),
+        test=mock_dataset_splits.test.copy(),
+        station_coords=mock_dataset_splits.station_coords,
+        feature_columns=mock_dataset_splits.feature_columns,
+    )
+    modified_splits.test.loc[0, "target"] += 50.0
+    hash_mod = compute_dataset_content_hash(modified_splits)
+    assert hash1 != hash_mod

@@ -7,13 +7,14 @@ evaluator-only ground truth for outage simulation.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
 from datetime import UTC
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from sensorguard.db.schema import Observation, Sensor, Station
@@ -45,9 +46,25 @@ class DatasetSplits:
 
 
 def load_pilot_dataset_from_db(session: Session) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
-    """Load Q1 2024 PM2.5 observations and station coordinates from database."""
+    """Load Q1 2024 PM2.5 observations and station coordinates from database.
+
+    Resolves observation revisions by strictly selecting the latest valid observation
+    version for each (sensor_id, observed_at) pair.
+    """
     stations = session.scalars(select(Station)).all()
     station_coords = {str(s.id): (s.latitude, s.longitude) for s in stations}
+
+    # Latest version subquery per sensor and observed timestamp
+    latest_version_subq = (
+        select(
+            Observation.sensor_id,
+            Observation.observed_at,
+            func.max(Observation.version).label("max_version"),
+        )
+        .where(Observation.quality_flag == "VALID")
+        .group_by(Observation.sensor_id, Observation.observed_at)
+        .subquery()
+    )
 
     stmt = (
         select(
@@ -57,6 +74,12 @@ def load_pilot_dataset_from_db(session: Session) -> tuple[pd.DataFrame, dict[str
         )
         .join(Sensor, Sensor.id == Observation.sensor_id)
         .join(Station, Station.id == Sensor.station_id)
+        .join(
+            latest_version_subq,
+            (Observation.sensor_id == latest_version_subq.c.sensor_id)
+            & (Observation.observed_at == latest_version_subq.c.observed_at)
+            & (Observation.version == latest_version_subq.c.max_version),
+        )
         .where(Sensor.parameter == "pm25")
         .where(Observation.quality_flag == "VALID")
         .order_by(Station.id, Observation.observed_at)
@@ -243,3 +266,40 @@ def partition_dataset(
         station_coords=station_coords,
         feature_columns=feature_cols,
     )
+
+
+def compute_dataset_content_hash(splits: DatasetSplits) -> str:
+    """Compute deterministic cryptographic SHA-256 fingerprint of split dataset contents.
+
+    Hashes feature column names, station coordinates, sorted timestamps, station IDs,
+    targets, and feature values across train, calibrate, and test splits.
+    """
+    hasher = hashlib.sha256()
+
+    # 1. Feature columns and coordinate metadata
+    cols_str = ",".join(sorted(splits.feature_columns))
+    hasher.update(cols_str.encode("utf-8"))
+    for st_id in sorted(splits.station_coords.keys()):
+        lat, lon = splits.station_coords[st_id]
+        hasher.update(f"{st_id}:{lat:.5f},{lon:.5f}".encode())
+
+    # 2. Partition contents
+    for name, split_df in [("train", splits.train), ("cal", splits.calibrate), ("test", splits.test)]:
+        hasher.update(f":split_{name}:".encode())
+        if split_df.empty:
+            continue
+        sorted_df = split_df.sort_values(["station_id", "timestamp"]).reset_index(drop=True)
+        # Hash identifiers and targets
+        for st_id, ts, target in zip(
+            sorted_df["station_id"],
+            sorted_df["timestamp"].astype(str),
+            sorted_df["target"].fillna(-9999.0).round(4),
+            strict=False,
+        ):
+            hasher.update(f"{st_id}|{ts}|{target};".encode())
+        # Hash key features
+        feat_cols = [c for c in splits.feature_columns if c in sorted_df.columns]
+        feat_bytes = np.ascontiguousarray(sorted_df[feat_cols].fillna(-9999.0).round(4).to_numpy()).tobytes()
+        hasher.update(feat_bytes)
+
+    return hasher.hexdigest()[:16]

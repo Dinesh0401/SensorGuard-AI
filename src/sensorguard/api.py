@@ -18,12 +18,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import joblib
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
@@ -59,7 +61,8 @@ from sensorguard.simulation import OutageConfig
 
 logger = logging.getLogger(__name__)
 
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "sensorguard-dev-admin-key-2026")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+_admin_request_history: list[float] = []
 
 app = FastAPI(
     title="SensorGuard AI Pilot & Research API",
@@ -81,12 +84,33 @@ def get_db():
 
 
 def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> None:
-    """Validate administrative authorization header."""
-    if x_admin_key != ADMIN_API_KEY:
+    """Validate administrative authorization header with constant-time equality and rate limits.
+
+    Fails closed with HTTP 503 if ADMIN_API_KEY is not configured in the environment.
+    """
+    admin_key = os.getenv("ADMIN_API_KEY") or ADMIN_API_KEY
+    if not admin_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Administrative endpoints are disabled: ADMIN_API_KEY is not configured.",
+        )
+    if not secrets.compare_digest(x_admin_key, admin_key):
+        logger.warning("ADMIN_SECURITY_ALERT: Unauthorized administrative access attempt rejected")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid administrative credentials",
         )
+
+    # Rate limiting: maximum 30 requests per minute
+    now = time.time()
+    _admin_request_history[:] = [t for t in _admin_request_history if now - t < 60.0]
+    if len(_admin_request_history) >= 30:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Administrative rate limit exceeded (max 30 requests per minute)",
+        )
+    _admin_request_history.append(now)
+    logger.info("ADMIN_AUDIT: Administrative request authenticated at %s", datetime.now(UTC).isoformat())
 
 
 def _ensure_utc(dt: datetime | None) -> datetime | None:
@@ -98,18 +122,30 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
     return dt
 
 
-# Global in-memory cache for trained SAGE model
+# Global in-memory cache and disk persistence for trained SAGE model
 _CACHED_SAGE_MODEL: SAGEForecaster | None = None
 _CACHED_MODEL_LOAD_TIME: float = 0.0
+ARTIFACT_DIR = Path("artifacts/models")
+MODEL_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.joblib"
 
 
 def get_or_train_sage_model(session: Session) -> SAGEForecaster:
-    """Retrieve cached SAGE model or fit on training partition."""
+    """Retrieve cached SAGE model or load pre-trained artifact without request-path retraining."""
     global _CACHED_SAGE_MODEL, _CACHED_MODEL_LOAD_TIME
-    if _CACHED_SAGE_MODEL is not None and (time.time() - _CACHED_MODEL_LOAD_TIME) < 3600:
+    if _CACHED_SAGE_MODEL is not None:
         return _CACHED_SAGE_MODEL
 
-    logger.info("Initializing and caching SAGE model for inference...")
+    if MODEL_PATH.exists():
+        try:
+            logger.info("Loading pre-trained SAGE model from %s...", MODEL_PATH)
+            model = joblib.load(MODEL_PATH)
+            _CACHED_SAGE_MODEL = model
+            _CACHED_MODEL_LOAD_TIME = time.time()
+            return model
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not load persisted model: %s. Re-fitting...", e)
+
+    logger.info("Initializing and training SAGE model for inference...")
     df, station_coords = load_pilot_dataset_from_db(session)
     featured_df = build_spatiotemporal_features(df, station_coords)
     splits = partition_dataset(featured_df, station_coords, train_pct=0.60, cal_pct=0.20)
@@ -129,6 +165,13 @@ def get_or_train_sage_model(session: Session) -> SAGEForecaster:
         X_cal=splits.calibrate,
         y_cal=splits.calibrate["target"].to_numpy(),
     )
+
+    try:
+        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+        joblib.dump(model, MODEL_PATH)
+        logger.info("Saved trained SAGE model artifact to %s", MODEL_PATH)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not persist model artifact: %s", e)
 
     _CACHED_SAGE_MODEL = model
     _CACHED_MODEL_LOAD_TIME = time.time()
@@ -185,17 +228,27 @@ def list_stations(
     if bbox:
         try:
             min_lon, min_lat, max_lon, max_lat = map(float, bbox.split(","))
-            stmt = stmt.where(
-                Station.longitude >= min_lon,
-                Station.longitude <= max_lon,
-                Station.latitude >= min_lat,
-                Station.latitude <= max_lat,
-            )
         except ValueError:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid bbox format. Expected 'min_lon,min_lat,max_lon,max_lat'",
             )
+        if not (-180.0 <= min_lon <= 180.0 and -180.0 <= max_lon <= 180.0 and min_lon < max_lon):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid bounding box: longitude must satisfy -180 <= min_lon < max_lon <= 180",
+            )
+        if not (-90.0 <= min_lat <= 90.0 and -90.0 <= max_lat <= 90.0 and min_lat < max_lat):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid bounding box: latitude must satisfy -90 <= min_lat < max_lat <= 90",
+            )
+        stmt = stmt.where(
+            Station.longitude >= min_lon,
+            Station.longitude <= max_lon,
+            Station.latitude >= min_lat,
+            Station.latitude <= max_lat,
+        )
 
     stations = db.scalars(stmt).all()
 
@@ -245,6 +298,7 @@ def list_stations(
                 timezone_name=s.timezone_name,
                 status=avail_status,
                 is_stale=is_stale,
+                is_archived_pilot=True,
                 latest_observation_time=obs_time,
                 latest_pm25_value=val,
                 age_hours=round(age, 2) if age is not None else None,
@@ -300,6 +354,7 @@ def get_station(station_id: int, db: Session = Depends(get_db)) -> StationSummar
         timezone_name=station.timezone_name,
         status=avail_status,
         is_stale=is_stale,
+        is_archived_pilot=True,
         latest_observation_time=obs_time,
         latest_pm25_value=val,
         age_hours=round(age, 2) if age is not None else None,

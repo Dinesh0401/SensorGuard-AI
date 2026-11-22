@@ -36,6 +36,10 @@ class StationSummary(BaseModel):
     timezone_name: str | None = None
     status: str = Field(..., description="Availability status: HEALTHY, LATE, NO_REPORT, OFFLINE_CONFIRMED")
     is_stale: bool = Field(..., description="True if latest reading exceeds freshness threshold (3h)")
+    is_archived_pilot: bool = Field(
+        default=True,
+        description="True if observations represent the Q1 2024 pilot benchmark, False if live stream",
+    )
     latest_observation_time: datetime | None = None
     latest_pm25_value: float | None = None
     age_hours: float | None = None
