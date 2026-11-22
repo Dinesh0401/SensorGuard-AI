@@ -179,7 +179,10 @@ class AdminIngestResponse(BaseModel):
 class AdminEvaluateRequest(BaseModel):
     """Parameters for protected administrative evaluation."""
 
-    scenario: str = Field(default="natural", description="Evaluation regime ('natural', 'mcar_20', 'mnar_gamma_1.5', 'burst_24h')")
+    scenario: str = Field(
+        default="natural",
+        description="Evaluation regime ('natural', 'mcar_20', 'mnar_gamma_1.5', 'burst_24h')",
+    )
     nominal_coverage: float = Field(default=0.90, ge=0.50, le=0.99)
 
 
