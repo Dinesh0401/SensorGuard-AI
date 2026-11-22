@@ -88,13 +88,14 @@ def build_ablation_model(
     condition: str,
     feature_cols: list[str],
     nominal_coverage: float = 0.90,
+    max_disagreement_threshold: float = 20.0,
 ) -> tuple[SAGEForecaster, list[str]]:
     """Configure SAGE model and feature subset for a specific ablation condition."""
     if condition == "full_sage":
         config = SAGEConfig(
             gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
             nominal_coverage=nominal_coverage,
-            max_disagreement_threshold=8.0,
+            max_disagreement_threshold=max_disagreement_threshold,
             min_effective_sample_size=15,
             stale_age_hours=12.0,
         )
@@ -105,7 +106,7 @@ def build_ablation_model(
         config = SAGEConfig(
             gamma_grid=(0.0,),
             nominal_coverage=nominal_coverage,
-            max_disagreement_threshold=8.0,
+            max_disagreement_threshold=max_disagreement_threshold,
             min_effective_sample_size=15,
             stale_age_hours=12.0,
         )
@@ -127,7 +128,7 @@ def build_ablation_model(
         config = SAGEConfig(
             gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
             nominal_coverage=nominal_coverage,
-            max_disagreement_threshold=8.0,
+            max_disagreement_threshold=max_disagreement_threshold,
             min_effective_sample_size=15,
             stale_age_hours=12.0,
         )
@@ -138,9 +139,9 @@ def build_ablation_model(
         config = SAGEConfig(
             gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
             nominal_coverage=nominal_coverage,
-            max_disagreement_threshold=8.0,
+            max_disagreement_threshold=max_disagreement_threshold,
             min_effective_sample_size=15,
-            stale_age_hours=1e9,  # age not penalized
+            stale_age_hours=1e9,  # age latency unobserved
         )
         cols = [c for c in feature_cols if "age" not in c.lower()]
 
@@ -155,6 +156,7 @@ def run_sage_ablation_suite(
     splits: DatasetSplits,
     seeds: list[int] | None = None,
     nominal_coverage: float = 0.90,
+    max_disagreement_threshold: float = 20.0,
     track_mlflow: bool = True,
     mlflow_experiment: str = "SensorGuard-SAGE-Ablations",
 ) -> dict[str, Any]:
@@ -177,7 +179,12 @@ def run_sage_ablation_suite(
     models: dict[str, SAGEForecaster] = {}
     for cond in ABLATION_CONDITIONS:
         logger.info("Fitting ablation condition: '%s'...", cond)
-        forecaster, _ = build_ablation_model(cond, feature_cols, nominal_coverage=nominal_coverage)
+        forecaster, _ = build_ablation_model(
+            cond,
+            feature_cols,
+            nominal_coverage=nominal_coverage,
+            max_disagreement_threshold=max_disagreement_threshold,
+        )
         forecaster.fit(
             X=train_df,
             y=train_df["target"].to_numpy(),

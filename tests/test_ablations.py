@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from scripts.run_sage_ablations import (
+from sensorguard.ablation import (
     ABLATION_CONDITIONS,
     build_ablation_model,
     prepare_scenario_test_data,
