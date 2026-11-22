@@ -1,5 +1,5 @@
 {
-  "benchmark_id": "SG-BENCH-20261122-125729",
+  "benchmark_id": "SG-BENCH-20261122-125837",
   "dataset_hash": "7e8f2d316bee0c4f",
   "nominal_coverage": 0.9,
   "n_train": 8884,
@@ -409,7 +409,9 @@
           "mpiw": 141.456,
           "winkler_score": 141.6776,
           "worst_stratum_coverage_gap": 0.0,
-          "strata": {}
+          "strata": {},
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8337
         }
       }
     },
@@ -815,7 +817,9 @@
           "mpiw": 141.468,
           "winkler_score": 141.7207,
           "worst_stratum_coverage_gap": 0.0,
-          "strata": {}
+          "strata": {},
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8342
         }
       }
     },
@@ -1221,7 +1225,9 @@
           "mpiw": 141.5245,
           "winkler_score": 141.7646,
           "worst_stratum_coverage_gap": 0.0,
-          "strata": {}
+          "strata": {},
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8328
         }
       }
     },
@@ -1627,7 +1633,9 @@
           "mpiw": 141.4547,
           "winkler_score": 141.6762,
           "worst_stratum_coverage_gap": 0.0,
-          "strata": {}
+          "strata": {},
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8337
         }
       }
     }
