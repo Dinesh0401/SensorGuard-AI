@@ -1,0 +1,1635 @@
+{
+  "benchmark_id": "SG-BENCH-20261122-125729",
+  "dataset_hash": "7e8f2d316bee0c4f",
+  "nominal_coverage": 0.9,
+  "n_train": 8884,
+  "n_calibrate": 2937,
+  "n_test": 3496,
+  "stations_count": 8,
+  "scenarios": {
+    "natural": {
+      "persistence": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2375,
+          "rmse": 0.7035,
+          "picp": 0.9688,
+          "coverage_gap": 0.0688,
+          "mpiw": 2.0,
+          "winkler_score": 3.1602,
+          "worst_stratum_coverage_gap": 0.1727,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9318,
+                "gap": 0.0318,
+                "mpiw": 2.0
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9814,
+                "gap": 0.0814,
+                "mpiw": 2.0
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9696,
+                "gap": 0.0696,
+                "mpiw": 2.0
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 0.9831,
+                "gap": 0.0831,
+                "mpiw": 2.0
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 0.7273,
+                "gap": 0.1727,
+                "mpiw": 2.0
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9671,
+                "gap": 0.0671,
+                "mpiw": 2.0
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9738,
+                "gap": 0.0738,
+                "mpiw": 2.0
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8112
+        }
+      },
+      "seasonal_naive": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 2.1525,
+          "rmse": 3.2025,
+          "picp": 0.9963,
+          "coverage_gap": 0.0963,
+          "mpiw": 21.4327,
+          "winkler_score": 21.7114,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9855,
+                "gap": 0.0855,
+                "mpiw": 23.534
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 20.722
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9959,
+                "gap": 0.0959,
+                "mpiw": 21.406
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 21.629
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 22.318
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9961,
+                "gap": 0.0961,
+                "mpiw": 21.448
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 21.389
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8331
+        }
+      },
+      "spatial_neighbor": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 1.8117,
+          "rmse": 2.4455,
+          "picp": 0.967,
+          "coverage_gap": 0.067,
+          "mpiw": 10.8224,
+          "winkler_score": 11.6487,
+          "worst_stratum_coverage_gap": 0.1727,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.8781,
+                "gap": 0.0219,
+                "mpiw": 11.017
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 10.757
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9668,
+                "gap": 0.0668,
+                "mpiw": 10.814
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 0.9916,
+                "gap": 0.0916,
+                "mpiw": 10.883
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 0.7273,
+                "gap": 0.1727,
+                "mpiw": 11.142
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9667,
+                "gap": 0.0667,
+                "mpiw": 10.815
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.968,
+                "gap": 0.068,
+                "mpiw": 10.843
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8084
+        }
+      },
+      "ridge": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3016,
+          "rmse": 0.6873,
+          "picp": 0.9604,
+          "coverage_gap": 0.0604,
+          "mpiw": 2.2252,
+          "winkler_score": 3.2594,
+          "worst_stratum_coverage_gap": 0.2182,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9158,
+                "gap": 0.0158,
+                "mpiw": 2.225
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9755,
+                "gap": 0.0755,
+                "mpiw": 2.225
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9623,
+                "gap": 0.0623,
+                "mpiw": 2.225
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 0.9662,
+                "gap": 0.0662,
+                "mpiw": 2.225
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 0.6818,
+                "gap": 0.2182,
+                "mpiw": 2.225
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9568,
+                "gap": 0.0568,
+                "mpiw": 2.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9709,
+                "gap": 0.0709,
+                "mpiw": 2.225
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8041
+        }
+      },
+      "lightgbm_point": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2806,
+          "rmse": 0.7984,
+          "picp": 0.9985,
+          "coverage_gap": 0.0985,
+          "mpiw": 13.2257,
+          "winkler_score": 13.3467,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9942,
+                "gap": 0.0942,
+                "mpiw": 15.051
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.608
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9984,
+                "gap": 0.0984,
+                "mpiw": 13.188
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 13.502
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 14.514
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.226
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.224
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8349
+        }
+      },
+      "lightgbm_quantile": {
+        "calibrator": "CQR (Romano et al. 2019)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2876,
+          "rmse": 0.8321,
+          "picp": 0.9989,
+          "coverage_gap": 0.0989,
+          "mpiw": 11.3455,
+          "winkler_score": 11.4472,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9956,
+                "gap": 0.0956,
+                "mpiw": 12.253
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.039
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2468,
+                "picp": 0.9988,
+                "gap": 0.0988,
+                "mpiw": 11.324
+              },
+              "moderate_delay": {
+                "count": 237,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.412
+              },
+              "stale_history": {
+                "count": 22,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.988
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.999,
+                "gap": 0.099,
+                "mpiw": 11.335
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.377
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8352
+        }
+      },
+      "lightgbm_aci": {
+        "calibrator": "Adaptive Conformal Inference (Gibbs & Cand\u00e8s 2021)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2806,
+          "rmse": 0.7984,
+          "picp": 0.9971,
+          "coverage_gap": 0.0971,
+          "mpiw": 141.456,
+          "winkler_score": 141.6776,
+          "worst_stratum_coverage_gap": 0.0,
+          "strata": {}
+        }
+      }
+    },
+    "mcar_20": {
+      "persistence": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2728,
+          "rmse": 0.7624,
+          "picp": 0.9663,
+          "coverage_gap": 0.0663,
+          "mpiw": 2.0,
+          "winkler_score": 3.3304,
+          "worst_stratum_coverage_gap": 0.1143,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.926,
+                "gap": 0.026,
+                "mpiw": 2.0
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9799,
+                "gap": 0.0799,
+                "mpiw": 2.0
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.9678,
+                "gap": 0.0678,
+                "mpiw": 2.0
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.9691,
+                "gap": 0.0691,
+                "mpiw": 2.0
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 0.7857,
+                "gap": 0.1143,
+                "mpiw": 2.0
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9632,
+                "gap": 0.0632,
+                "mpiw": 2.0
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9753,
+                "gap": 0.0753,
+                "mpiw": 2.0
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8098
+        }
+      },
+      "seasonal_naive": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 2.1525,
+          "rmse": 3.2025,
+          "picp": 0.9963,
+          "coverage_gap": 0.0963,
+          "mpiw": 21.4327,
+          "winkler_score": 21.7114,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9855,
+                "gap": 0.0855,
+                "mpiw": 23.534
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 20.722
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.9959,
+                "gap": 0.0959,
+                "mpiw": 21.427
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.9973,
+                "gap": 0.0973,
+                "mpiw": 21.423
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 22.107
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9961,
+                "gap": 0.0961,
+                "mpiw": 21.448
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 21.389
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8338
+        }
+      },
+      "spatial_neighbor": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 1.8117,
+          "rmse": 2.4455,
+          "picp": 0.967,
+          "coverage_gap": 0.067,
+          "mpiw": 10.8224,
+          "winkler_score": 11.6487,
+          "worst_stratum_coverage_gap": 0.1143,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.8781,
+                "gap": 0.0219,
+                "mpiw": 11.017
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 10.757
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.9652,
+                "gap": 0.0652,
+                "mpiw": 10.815
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.9785,
+                "gap": 0.0785,
+                "mpiw": 10.835
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 0.7857,
+                "gap": 0.1143,
+                "mpiw": 11.004
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9667,
+                "gap": 0.0667,
+                "mpiw": 10.815
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.968,
+                "gap": 0.068,
+                "mpiw": 10.843
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8092
+        }
+      },
+      "ridge": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3308,
+          "rmse": 0.7414,
+          "picp": 0.9575,
+          "coverage_gap": 0.0575,
+          "mpiw": 2.2252,
+          "winkler_score": 3.4079,
+          "worst_stratum_coverage_gap": 0.1857,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.91,
+                "gap": 0.01,
+                "mpiw": 2.225
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9735,
+                "gap": 0.0735,
+                "mpiw": 2.225
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.9611,
+                "gap": 0.0611,
+                "mpiw": 2.225
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.957,
+                "gap": 0.057,
+                "mpiw": 2.225
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 0.7143,
+                "gap": 0.1857,
+                "mpiw": 2.225
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9534,
+                "gap": 0.0534,
+                "mpiw": 2.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9695,
+                "gap": 0.0695,
+                "mpiw": 2.225
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8024
+        }
+      },
+      "lightgbm_point": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3116,
+          "rmse": 0.8448,
+          "picp": 0.9982,
+          "coverage_gap": 0.0982,
+          "mpiw": 13.2232,
+          "winkler_score": 13.3549,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9927,
+                "gap": 0.0927,
+                "mpiw": 15.041
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.608
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.998,
+                "gap": 0.098,
+                "mpiw": 13.171
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.9987,
+                "gap": 0.0987,
+                "mpiw": 13.322
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 14.232
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.998,
+                "gap": 0.098,
+                "mpiw": 13.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.219
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8354
+        }
+      },
+      "lightgbm_quantile": {
+        "calibrator": "CQR (Romano et al. 2019)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3177,
+          "rmse": 0.8774,
+          "picp": 0.9985,
+          "coverage_gap": 0.0985,
+          "mpiw": 11.358,
+          "winkler_score": 11.4611,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9956,
+                "gap": 0.0956,
+                "mpiw": 12.278
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9995,
+                "gap": 0.0995,
+                "mpiw": 11.047
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1955,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.327
+              },
+              "moderate_delay": {
+                "count": 744,
+                "picp": 0.9987,
+                "gap": 0.0987,
+                "mpiw": 11.388
+              },
+              "stale_history": {
+                "count": 28,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.714
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.349
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.385
+              }
+            }
+          },
+          "abstention_rate": 0.0721,
+          "published_coverage": 0.8357
+        }
+      },
+      "lightgbm_aci": {
+        "calibrator": "Adaptive Conformal Inference (Gibbs & Cand\u00e8s 2021)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3116,
+          "rmse": 0.8448,
+          "picp": 0.9967,
+          "coverage_gap": 0.0967,
+          "mpiw": 141.468,
+          "winkler_score": 141.7207,
+          "worst_stratum_coverage_gap": 0.0,
+          "strata": {}
+        }
+      }
+    },
+    "mnar_gamma_1.5": {
+      "persistence": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2838,
+          "rmse": 0.7997,
+          "picp": 0.9644,
+          "coverage_gap": 0.0644,
+          "mpiw": 2.0,
+          "winkler_score": 3.4903,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9158,
+                "gap": 0.0158,
+                "mpiw": 2.0
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9809,
+                "gap": 0.0809,
+                "mpiw": 2.0
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 0.9765,
+                "gap": 0.0765,
+                "mpiw": 2.0
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.9389,
+                "gap": 0.0389,
+                "mpiw": 2.0
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 0.8,
+                "gap": 0.1,
+                "mpiw": 2.0
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9617,
+                "gap": 0.0617,
+                "mpiw": 2.0
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9724,
+                "gap": 0.0724,
+                "mpiw": 2.0
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8075
+        }
+      },
+      "seasonal_naive": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 2.1525,
+          "rmse": 3.2025,
+          "picp": 0.9963,
+          "coverage_gap": 0.0963,
+          "mpiw": 21.4327,
+          "winkler_score": 21.7114,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9855,
+                "gap": 0.0855,
+                "mpiw": 23.534
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 20.722
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 21.184
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.9864,
+                "gap": 0.0864,
+                "mpiw": 22.049
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 22.533
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9961,
+                "gap": 0.0961,
+                "mpiw": 21.448
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 21.389
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8331
+        }
+      },
+      "spatial_neighbor": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 1.8117,
+          "rmse": 2.4455,
+          "picp": 0.967,
+          "coverage_gap": 0.067,
+          "mpiw": 10.8224,
+          "winkler_score": 11.6487,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.8781,
+                "gap": 0.0219,
+                "mpiw": 11.017
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 10.757
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 0.9857,
+                "gap": 0.0857,
+                "mpiw": 10.773
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.924,
+                "gap": 0.024,
+                "mpiw": 10.943
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 0.8,
+                "gap": 0.1,
+                "mpiw": 11.084
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9667,
+                "gap": 0.0667,
+                "mpiw": 10.815
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.968,
+                "gap": 0.068,
+                "mpiw": 10.843
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8084
+        }
+      },
+      "ridge": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3411,
+          "rmse": 0.7803,
+          "picp": 0.9549,
+          "coverage_gap": 0.0549,
+          "mpiw": 2.2252,
+          "winkler_score": 3.5661,
+          "worst_stratum_coverage_gap": 0.1667,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.8955,
+                "gap": 0.0045,
+                "mpiw": 2.225
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.975,
+                "gap": 0.075,
+                "mpiw": 2.225
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 0.9699,
+                "gap": 0.0699,
+                "mpiw": 2.225
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.924,
+                "gap": 0.024,
+                "mpiw": 2.225
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 0.7333,
+                "gap": 0.1667,
+                "mpiw": 2.225
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9505,
+                "gap": 0.0505,
+                "mpiw": 2.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.968,
+                "gap": 0.068,
+                "mpiw": 2.225
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.7995
+        }
+      },
+      "lightgbm_point": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.321,
+          "rmse": 0.8652,
+          "picp": 0.9978,
+          "coverage_gap": 0.0978,
+          "mpiw": 13.2216,
+          "winkler_score": 13.3619,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9913,
+                "gap": 0.0913,
+                "mpiw": 15.04
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.607
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.925
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.9919,
+                "gap": 0.0919,
+                "mpiw": 13.956
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 14.539
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9975,
+                "gap": 0.0975,
+                "mpiw": 13.222
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.22
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8343
+        }
+      },
+      "lightgbm_quantile": {
+        "calibrator": "CQR (Romano et al. 2019)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3257,
+          "rmse": 0.8939,
+          "picp": 0.9982,
+          "coverage_gap": 0.0982,
+          "mpiw": 11.3606,
+          "winkler_score": 11.4675,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9927,
+                "gap": 0.0927,
+                "mpiw": 12.299
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.043
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 1960,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.127
+              },
+              "moderate_delay": {
+                "count": 737,
+                "picp": 0.9932,
+                "gap": 0.0932,
+                "mpiw": 11.918
+              },
+              "stale_history": {
+                "count": 30,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.9
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.998,
+                "gap": 0.098,
+                "mpiw": 11.344
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.409
+              }
+            }
+          },
+          "abstention_rate": 0.0712,
+          "published_coverage": 0.8346
+        }
+      },
+      "lightgbm_aci": {
+        "calibrator": "Adaptive Conformal Inference (Gibbs & Cand\u00e8s 2021)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.321,
+          "rmse": 0.8652,
+          "picp": 0.996,
+          "coverage_gap": 0.096,
+          "mpiw": 141.5245,
+          "winkler_score": 141.7646,
+          "worst_stratum_coverage_gap": 0.0,
+          "strata": {}
+        }
+      }
+    },
+    "burst_24h": {
+      "persistence": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2423,
+          "rmse": 0.7084,
+          "picp": 0.9677,
+          "coverage_gap": 0.0677,
+          "mpiw": 2.0,
+          "winkler_score": 3.1823,
+          "worst_stratum_coverage_gap": 0.1143,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9318,
+                "gap": 0.0318,
+                "mpiw": 2.0
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9799,
+                "gap": 0.0799,
+                "mpiw": 2.0
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9694,
+                "gap": 0.0694,
+                "mpiw": 2.0
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 0.9828,
+                "gap": 0.0828,
+                "mpiw": 2.0
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 0.7857,
+                "gap": 0.1143,
+                "mpiw": 2.0
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9662,
+                "gap": 0.0662,
+                "mpiw": 2.0
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9724,
+                "gap": 0.0724,
+                "mpiw": 2.0
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.811
+        }
+      },
+      "seasonal_naive": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 2.1525,
+          "rmse": 3.2025,
+          "picp": 0.9963,
+          "coverage_gap": 0.0963,
+          "mpiw": 21.4327,
+          "winkler_score": 21.7114,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9855,
+                "gap": 0.0855,
+                "mpiw": 23.534
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 20.722
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9959,
+                "gap": 0.0959,
+                "mpiw": 21.417
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 21.672
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 21.0
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9961,
+                "gap": 0.0961,
+                "mpiw": 21.448
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 21.389
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8331
+        }
+      },
+      "spatial_neighbor": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 1.8117,
+          "rmse": 2.4455,
+          "picp": 0.967,
+          "coverage_gap": 0.067,
+          "mpiw": 10.8224,
+          "winkler_score": 11.6487,
+          "worst_stratum_coverage_gap": 0.0971,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.8781,
+                "gap": 0.0219,
+                "mpiw": 11.017
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9971,
+                "gap": 0.0971,
+                "mpiw": 10.757
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9666,
+                "gap": 0.0666,
+                "mpiw": 10.817
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 0.9914,
+                "gap": 0.0914,
+                "mpiw": 10.887
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 0.8571,
+                "gap": 0.0429,
+                "mpiw": 10.778
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9667,
+                "gap": 0.0667,
+                "mpiw": 10.815
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.968,
+                "gap": 0.068,
+                "mpiw": 10.843
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8083
+        }
+      },
+      "ridge": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.3048,
+          "rmse": 0.69,
+          "picp": 0.9597,
+          "coverage_gap": 0.0597,
+          "mpiw": 2.2252,
+          "winkler_score": 3.2677,
+          "worst_stratum_coverage_gap": 0.1381,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9158,
+                "gap": 0.0158,
+                "mpiw": 2.225
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 0.9745,
+                "gap": 0.0745,
+                "mpiw": 2.225
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9621,
+                "gap": 0.0621,
+                "mpiw": 2.225
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 0.9698,
+                "gap": 0.0698,
+                "mpiw": 2.225
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 0.7619,
+                "gap": 0.1381,
+                "mpiw": 2.225
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9564,
+                "gap": 0.0564,
+                "mpiw": 2.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9695,
+                "gap": 0.0695,
+                "mpiw": 2.225
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8042
+        }
+      },
+      "lightgbm_point": {
+        "calibrator": "Split Conformal",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2816,
+          "rmse": 0.7986,
+          "picp": 0.9985,
+          "coverage_gap": 0.0985,
+          "mpiw": 13.2243,
+          "winkler_score": 13.3453,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9942,
+                "gap": 0.0942,
+                "mpiw": 15.051
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.607
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9984,
+                "gap": 0.0984,
+                "mpiw": 13.19
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 13.512
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 13.669
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.225
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 13.224
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8349
+        }
+      },
+      "lightgbm_quantile": {
+        "calibrator": "CQR (Romano et al. 2019)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2887,
+          "rmse": 0.8323,
+          "picp": 0.9989,
+          "coverage_gap": 0.0989,
+          "mpiw": 11.3565,
+          "winkler_score": 11.4583,
+          "worst_stratum_coverage_gap": 0.1,
+          "strata": {
+            "pollution_level": {
+              "high_pollution": {
+                "count": 689,
+                "picp": 0.9956,
+                "gap": 0.0956,
+                "mpiw": 12.253
+              },
+              "normal": {
+                "count": 2038,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.053
+              }
+            },
+            "freshness": {
+              "fresh": {
+                "count": 2453,
+                "picp": 0.9988,
+                "gap": 0.0988,
+                "mpiw": 11.326
+              },
+              "moderate_delay": {
+                "count": 232,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 11.418
+              },
+              "stale_history": {
+                "count": 42,
+                "picp": 1.0,
+                "gap": 0.1,
+                "mpiw": 12.777
+              }
+            },
+            "diurnal": {
+              "off_peak": {
+                "count": 2039,
+                "picp": 0.999,
+                "gap": 0.099,
+                "mpiw": 11.345
+              },
+              "rush_hour": {
+                "count": 688,
+                "picp": 0.9985,
+                "gap": 0.0985,
+                "mpiw": 11.39
+              }
+            }
+          },
+          "abstention_rate": 0.0781,
+          "published_coverage": 0.8352
+        }
+      },
+      "lightgbm_aci": {
+        "calibrator": "Adaptive Conformal Inference (Gibbs & Cand\u00e8s 2021)",
+        "metrics": {
+          "n_samples": 2727,
+          "mae": 0.2816,
+          "rmse": 0.7986,
+          "picp": 0.9971,
+          "coverage_gap": 0.0971,
+          "mpiw": 141.4547,
+          "winkler_score": 141.6762,
+          "worst_stratum_coverage_gap": 0.0,
+          "strata": {}
+        }
+      }
+    }
+  }
+}

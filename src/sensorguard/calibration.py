@@ -83,7 +83,9 @@ class ConformalizedQuantileRegression:
         self.alpha = alpha
         self.q_adjustment: float | None = None
 
-    def fit(self, y_cal: np.ndarray, q_low_cal: np.ndarray, q_high_cal: np.ndarray) -> ConformalizedQuantileRegression:
+    def fit(
+        self, y_cal: np.ndarray, q_low_cal: np.ndarray, q_high_cal: np.ndarray
+    ) -> ConformalizedQuantileRegression:
         y = np.asarray(y_cal, dtype=float)
         ql = np.asarray(q_low_cal, dtype=float)
         qh = np.asarray(q_high_cal, dtype=float)

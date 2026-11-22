@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC
 
 import numpy as np
 import pandas as pd
@@ -107,7 +107,7 @@ def build_spatiotemporal_features(
         s_data = data[data["station_id"] == s_id].drop_duplicates("timestamp").set_index("timestamp")
         s_reindexed = s_data.reindex(full_idx)
         s_reindexed["station_id"] = s_id
-        s_reindexed["reported"] = s_reindexed["reported"].fillna(False).astype(bool)
+        s_reindexed["reported"] = s_reindexed["reported"].infer_objects(copy=False).fillna(False).astype(bool)
         s_reindexed = s_reindexed.reset_index().rename(columns={"index": "timestamp"})
         station_frames.append(s_reindexed)
 
@@ -147,7 +147,6 @@ def build_spatiotemporal_features(
 
     # Spatial neighbor feature computation at each timestamp slice
     # Computes inverse-distance weighted average of all other stations reporting at <= t
-    timestamps = featured_df["timestamp"].unique()
     featured_df["neighbor_idw_pm25"] = np.nan
 
     # Precompute pairwise distances

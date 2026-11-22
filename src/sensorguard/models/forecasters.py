@@ -36,7 +36,9 @@ class BaseForecaster(ABC):
         """Generate point forecasts for target time (one step ahead)."""
         ...
 
-    def predict_interval(self, X: pd.DataFrame, nominal_coverage: float = 0.90) -> tuple[np.ndarray, np.ndarray]:
+    def predict_interval(
+        self, X: pd.DataFrame, nominal_coverage: float = 0.90
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Generate prediction interval [lower, upper].
 
         Default implementation raises NotImplementedError if the model
@@ -109,7 +111,9 @@ class RidgeForecaster(BaseForecaster):
         self.pipeline: Pipeline | None = None
 
     def fit(self, X: pd.DataFrame, y: np.ndarray) -> RidgeForecaster:
-        cols = self.feature_columns or [c for c in X.columns if c not in {"target", "station_id", "timestamp"}]
+        cols = self.feature_columns or [
+            c for c in X.columns if c not in {"target", "station_id", "timestamp"}
+        ]
         self.feature_columns = cols
         feat_df = X[cols].copy()
 
@@ -153,7 +157,9 @@ class LightGBMPointForecaster(BaseForecaster):
         self.model: LGBMRegressor | None = None
 
     def fit(self, X: pd.DataFrame, y: np.ndarray) -> LightGBMPointForecaster:
-        cols = self.feature_columns or [c for c in X.columns if c not in {"target", "station_id", "timestamp"}]
+        cols = self.feature_columns or [
+            c for c in X.columns if c not in {"target", "station_id", "timestamp"}
+        ]
         self.feature_columns = cols
         feat_df = X[cols].copy()
 
@@ -194,7 +200,9 @@ class LightGBMQuantileForecaster(BaseForecaster):
         self.models: dict[float, LGBMRegressor] = {}
 
     def fit(self, X: pd.DataFrame, y: np.ndarray) -> LightGBMQuantileForecaster:
-        cols = self.feature_columns or [c for c in X.columns if c not in {"target", "station_id", "timestamp"}]
+        cols = self.feature_columns or [
+            c for c in X.columns if c not in {"target", "station_id", "timestamp"}
+        ]
         self.feature_columns = cols
         feat_df = X[cols].copy()
 
@@ -218,7 +226,9 @@ class LightGBMQuantileForecaster(BaseForecaster):
         feat_df = X[self.feature_columns]
         return {q: np.clip(model.predict(feat_df), 0.0, None) for q, model in self.models.items()}
 
-    def predict_interval(self, X: pd.DataFrame, nominal_coverage: float = 0.90) -> tuple[np.ndarray, np.ndarray]:
+    def predict_interval(
+        self, X: pd.DataFrame, nominal_coverage: float = 0.90
+    ) -> tuple[np.ndarray, np.ndarray]:
         """Uncalibrated pinball prediction interval."""
         q_low = round((1.0 - nominal_coverage) / 2.0, 3)
         q_high = round(1.0 - q_low, 3)
