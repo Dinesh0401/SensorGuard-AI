@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Ingest real Q1 2024 observations for the 8 approved pilot monitoring stations.
 
 Persists raw batches with cryptographic hashes, station metadata, sensor registries,
