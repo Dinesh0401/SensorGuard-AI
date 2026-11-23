@@ -161,7 +161,7 @@ class IngestScheduler:
                         if api_key:
                             try:
                                 client = OpenAQClient(api_key=api_key)
-                                pipeline = OpenAQIngestionPipeline(session)
+                                pipeline = IngestionPipeline(session)
                                 sensors = session.scalars(
                                     select(Sensor).where(Sensor.parameter == "pm25")
                                 ).all()
