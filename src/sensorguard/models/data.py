@@ -231,17 +231,21 @@ def partition_dataset(
     unique_ts = np.sort(df["timestamp"].unique())
     n = len(unique_ts)
 
-    idx_train_end = int(n * train_pct)
-    idx_cal_end = int(n * (train_pct + cal_pct))
+    idx_train_end = min(n - 1, int(n * train_pct))
+    idx_cal_end = min(n, int(n * (train_pct + cal_pct)))
 
     t_train_end = unique_ts[idx_train_end]
-    t_cal_end = unique_ts[idx_cal_end]
 
     # Training and calibration use observed labels that would have arrived
     train_mask = (df["timestamp"] < t_train_end) & df["reported"]
-    cal_mask = (df["timestamp"] >= t_train_end) & (df["timestamp"] < t_cal_end) & df["reported"]
-    # Test set includes all ground truth for evaluator-only scoring
-    test_mask = df["timestamp"] >= t_cal_end
+    if idx_cal_end < n:
+        t_cal_end = unique_ts[idx_cal_end]
+        cal_mask = (df["timestamp"] >= t_train_end) & (df["timestamp"] < t_cal_end) & df["reported"]
+        # Test set includes all ground truth for evaluator-only scoring
+        test_mask = df["timestamp"] >= t_cal_end
+    else:
+        cal_mask = (df["timestamp"] >= t_train_end) & df["reported"]
+        test_mask = pd.Series(False, index=df.index)
 
     feature_cols = [
         "last_pm25",

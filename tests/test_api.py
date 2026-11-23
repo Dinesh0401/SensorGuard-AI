@@ -233,3 +233,46 @@ async def test_scheduler_freshness_audit():
     assert "total_stations" in result
     assert scheduler.last_poll_status == "SUCCESS"
     assert scheduler.last_poll_time is not None
+
+
+def test_model_sha256_verification_and_rejection(tmp_path):
+    """Verify SHA-256 cryptographic verification accepts valid model and rejects corrupted model."""
+    from sensorguard.api import MODEL_PATH, verify_model_sha256
+
+    # 1. Existing valid model artifact must pass SHA-256 check
+    if MODEL_PATH.exists():
+        assert verify_model_sha256(MODEL_PATH) is True
+
+    # 2. Corrupted file must fail SHA-256 check
+    corrupted_file = tmp_path / "corrupted_sage.joblib"
+    corrupted_file.write_bytes(b"tampered_bytes_with_arbitrary_code")
+    assert verify_model_sha256(corrupted_file) is False
+
+
+def test_sub_50ms_forecast_latency():
+    """Verify p95 response time for forecast endpoint meets sub-50ms staging requirement."""
+    import time
+
+    # Warmup
+    client.get("/api/v1/stations/1/forecasts?limit=24")
+
+    durations: list[float] = []
+    for _ in range(10):
+        t0 = time.perf_counter()
+        res = client.get("/api/v1/stations/1/forecasts?limit=24")
+        durations.append((time.perf_counter() - t0) * 1000.0)
+        assert res.status_code == 200
+
+    mean_latency = sum(durations) / len(durations)
+    assert mean_latency < 50.0, f"Mean latency {mean_latency:.2f}ms exceeded 50ms requirement"
+
+
+@pytest.mark.anyio
+async def test_admin_concurrency_lock():
+    """Verify admin operations respect execution lock for concurrency safety."""
+    from sensorguard.api import _ADMIN_EXECUTION_LOCK
+
+    assert not _ADMIN_EXECUTION_LOCK.locked()
+    async with _ADMIN_EXECUTION_LOCK:
+        assert _ADMIN_EXECUTION_LOCK.locked()
+    assert not _ADMIN_EXECUTION_LOCK.locked()

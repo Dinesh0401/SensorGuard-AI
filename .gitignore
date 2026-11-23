@@ -15,3 +15,7 @@ scratch/
 *.parquet
 *.db
 .DS_Store
+node_modules/
+.next/
+out/
+

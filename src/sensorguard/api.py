@@ -15,6 +15,8 @@ Implements all Milestone 5 API contracts:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
@@ -125,29 +128,90 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
 # Global in-memory cache and disk persistence for trained SAGE model
 _CACHED_SAGE_MODEL: SAGEForecaster | None = None
 _CACHED_MODEL_LOAD_TIME: float = 0.0
+_CACHED_FEATURE_DF: pd.DataFrame | None = None
+_CACHED_STATION_COORDS: dict[str, tuple[float, float]] | None = None
+_CACHED_STATION_LATEST: dict[int, tuple[datetime | None, float | None]] | None = None
+_CACHED_MAX_DB_TIME: datetime | None = None
+_ADMIN_EXECUTION_LOCK = asyncio.Lock()
+
 ARTIFACT_DIR = Path("artifacts/models")
 MODEL_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.joblib"
+MODEL_SHA256_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.sha256"
+EXPECTED_MODEL_SHA256 = "6155ee41544f4a53b24c4528bbc55afa3f7e3b02aa511f61d65605ff40eab77b"
+
+
+def verify_model_sha256(path: Path) -> bool:
+    """Verify SHA-256 cryptographic integrity hash of persisted model artifact."""
+    if not path.exists():
+        return False
+    content = path.read_bytes()
+    computed_hash = hashlib.sha256(content).hexdigest().lower()
+    expected_hash = EXPECTED_MODEL_SHA256.lower()
+    if MODEL_SHA256_PATH.exists():
+        try:
+            stored_line = MODEL_SHA256_PATH.read_text(encoding="utf-8").strip()
+            stored_hash = stored_line.split()[0].lower()
+            if stored_hash:
+                expected_hash = stored_hash
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not read stored sha256 file: %s", e)
+    return secrets.compare_digest(computed_hash, expected_hash)
+
+
+def get_cached_pilot_features(session: Session) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
+    """Retrieve pre-computed spatiotemporal features for Q1 2024 pilot data with sub-millisecond access."""
+    global _CACHED_FEATURE_DF, _CACHED_STATION_COORDS, _CACHED_STATION_LATEST, _CACHED_MAX_DB_TIME
+    if _CACHED_FEATURE_DF is not None and _CACHED_STATION_COORDS is not None:
+        return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
+
+    logger.info("Building in-memory cached spatiotemporal feature matrix for sub-50ms API latency...")
+    df, station_coords = load_pilot_dataset_from_db(session)
+    featured_df = build_spatiotemporal_features(df, station_coords)
+    _CACHED_FEATURE_DF = featured_df
+    _CACHED_STATION_COORDS = station_coords
+
+    max_db_raw = session.scalar(select(func.max(Observation.observed_at)))
+    _CACHED_MAX_DB_TIME = _ensure_utc(max_db_raw) or datetime.now(UTC)
+
+    # Pre-cache latest observation per station
+    latest_by_station: dict[int, tuple[datetime | None, float | None]] = {}
+    obs_rows = session.execute(
+        select(Sensor.station_id, Observation.observed_at, Observation.value)
+        .join(Observation, Observation.sensor_id == Sensor.id)
+        .where(Sensor.parameter == "pm25")
+        .order_by(desc(Observation.observed_at))
+    ).all()
+    for st_id, obs_dt, val in obs_rows:
+        if st_id not in latest_by_station:
+            latest_by_station[st_id] = (obs_dt, val)
+    _CACHED_STATION_LATEST = latest_by_station
+
+    return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
 
 def get_or_train_sage_model(session: Session) -> SAGEForecaster:
-    """Retrieve cached SAGE model or load pre-trained artifact without request-path retraining."""
+    """Retrieve cached SAGE model or load pre-trained artifact with cryptographic SHA-256 integrity verification."""
     global _CACHED_SAGE_MODEL, _CACHED_MODEL_LOAD_TIME
     if _CACHED_SAGE_MODEL is not None:
         return _CACHED_SAGE_MODEL
 
     if MODEL_PATH.exists():
-        try:
-            logger.info("Loading pre-trained SAGE model from %s...", MODEL_PATH)
-            model = joblib.load(MODEL_PATH)
-            _CACHED_SAGE_MODEL = model
-            _CACHED_MODEL_LOAD_TIME = time.time()
-            return model
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Could not load persisted model: %s. Re-fitting...", e)
+        if not verify_model_sha256(MODEL_PATH):
+            logger.critical(
+                "SECURITY_ALERT: SAGE model artifact SHA-256 check failed! Rejecting corrupted model artifact."
+            )
+        else:
+            try:
+                logger.info("Loading cryptographically verified SAGE model from %s...", MODEL_PATH)
+                model = joblib.load(MODEL_PATH)
+                _CACHED_SAGE_MODEL = model
+                _CACHED_MODEL_LOAD_TIME = time.time()
+                return model
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Could not load persisted model: %s. Re-fitting...", e)
 
     logger.info("Initializing and training SAGE model for inference...")
-    df, station_coords = load_pilot_dataset_from_db(session)
-    featured_df = build_spatiotemporal_features(df, station_coords)
+    featured_df, station_coords = get_cached_pilot_features(session)
     splits = partition_dataset(featured_df, station_coords, train_pct=0.60, cal_pct=0.20)
 
     cfg = SAGEConfig(
@@ -169,7 +233,10 @@ def get_or_train_sage_model(session: Session) -> SAGEForecaster:
     try:
         ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
         joblib.dump(model, MODEL_PATH)
-        logger.info("Saved trained SAGE model artifact to %s", MODEL_PATH)
+        content = MODEL_PATH.read_bytes()
+        sha = hashlib.sha256(content).hexdigest()
+        MODEL_SHA256_PATH.write_text(f"{sha}  sage_pilot_q1_2024.joblib\n", encoding="utf-8")
+        logger.info("Saved trained SAGE model artifact and SHA-256 to %s", MODEL_PATH)
     except Exception as e:  # noqa: BLE001
         logger.warning("Could not persist model artifact: %s", e)
 
@@ -252,25 +319,19 @@ def list_stations(
 
     stations = db.scalars(stmt).all()
 
-    # Determine reference max time in database to calculate honest staleness
-    max_db_raw = db.scalar(select(func.max(Observation.observed_at)))
-    max_db_time = _ensure_utc(max_db_raw) or datetime.now(UTC)
+    # Retrieve cached latest observation info for sub-millisecond catalog queries
+    if _CACHED_STATION_LATEST is None or _CACHED_MAX_DB_TIME is None:
+        get_cached_pilot_features(db)
 
+    max_db_time = _CACHED_MAX_DB_TIME or datetime.now(UTC)
+    latest_by_station = _CACHED_STATION_LATEST or {}
     station_summaries: list[StationSummary] = []
-    for s in stations:
-        # Fetch latest observation for this station
-        latest_obs = db.scalars(
-            select(Observation)
-            .join(Sensor, Sensor.id == Observation.sensor_id)
-            .where(Sensor.station_id == s.id)
-            .where(Sensor.parameter == "pm25")
-            .order_by(desc(Observation.observed_at))
-            .limit(1)
-        ).first()
 
-        if latest_obs and latest_obs.observed_at:
-            obs_time = _ensure_utc(latest_obs.observed_at)
-            val = latest_obs.value
+    for s in stations:
+        obs_info = latest_by_station.get(s.id)
+        if obs_info and obs_info[0]:
+            obs_time = _ensure_utc(obs_info[0])
+            val = obs_info[1]
             age = max(0.0, (max_db_time - obs_time).total_seconds() / 3600.0) if obs_time else 0.0
             if age <= 3.0:
                 avail_status = "HEALTHY"
@@ -449,9 +510,8 @@ def get_station_forecasts(
     if not station:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found")
 
-    # Load recent observations to construct test feature rows
-    df, station_coords = load_pilot_dataset_from_db(db)
-    featured_df = build_spatiotemporal_features(df, station_coords)
+    # Load recent observations from in-memory cached features for sub-50ms latency
+    featured_df, _ = get_cached_pilot_features(db)
     st_df = (
         featured_df[featured_df["station_id"] == str(station_id)].sort_values("timestamp").tail(limit).copy()
     )
@@ -743,21 +803,22 @@ def demo_experiment(
     dependencies=[Depends(verify_admin_key)],
     tags=["Admin"],
 )
-def admin_ingest(
+async def admin_ingest(
     payload: AdminIngestRequest,
     db: Session = Depends(get_db),
 ) -> AdminIngestResponse:
-    """Protected administrative ingestion endpoint with bounded lookback limits."""
-    t0 = time.time()
-    cnt_before = db.scalar(select(func.count(Observation.id))) or 0
-    duration = round(time.time() - t0, 3)
+    """Protected administrative ingestion endpoint with bounded lookback limits and concurrency lock."""
+    async with _ADMIN_EXECUTION_LOCK:
+        t0 = time.time()
+        cnt_before = db.scalar(select(func.count(Observation.id))) or 0
+        duration = round(time.time() - t0, 3)
 
-    return AdminIngestResponse(
-        status="completed",
-        message=f"Pilot network database verified ({cnt_before} observations active across 8 stations).",
-        ingested_count=cnt_before,
-        execution_time_seconds=duration,
-    )
+        return AdminIngestResponse(
+            status="completed",
+            message=f"Pilot network database verified ({cnt_before} observations active across 8 stations).",
+            ingested_count=cnt_before,
+            execution_time_seconds=duration,
+        )
 
 
 @app.post(
@@ -766,29 +827,30 @@ def admin_ingest(
     dependencies=[Depends(verify_admin_key)],
     tags=["Admin"],
 )
-def admin_evaluate(
+async def admin_evaluate(
     payload: AdminEvaluateRequest,
     db: Session = Depends(get_db),
 ) -> AdminEvaluateResponse:
-    """Protected administrative evaluation endpoint."""
-    bench_file = Path("docs/audit/benchmark_results.json")
-    if not bench_file.exists():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Benchmark audit results not generated yet",
-        )
+    """Protected administrative evaluation endpoint with concurrency lock."""
+    async with _ADMIN_EXECUTION_LOCK:
+        bench_file = Path("docs/audit/benchmark_results.json")
+        if not bench_file.exists():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Benchmark audit results not generated yet",
+            )
 
-    data = json.loads(bench_file.read_text(encoding="utf-8"))
-    scen_data = data.get("scenarios", {}).get(payload.scenario, {})
-    if not scen_data:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Scenario '{payload.scenario}' not present in evaluation benchmark",
-        )
+        data = json.loads(bench_file.read_text(encoding="utf-8"))
+        scen_data = data.get("scenarios", {}).get(payload.scenario, {})
+        if not scen_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Scenario '{payload.scenario}' not present in evaluation benchmark",
+            )
 
-    return AdminEvaluateResponse(
-        benchmark_id=data.get("benchmark_id", "SG-BENCH-M3"),
-        scenario=payload.scenario,
-        nominal_coverage=payload.nominal_coverage,
-        metrics=scen_data,
-    )
+        return AdminEvaluateResponse(
+            benchmark_id=data.get("benchmark_id", "SG-BENCH-M3"),
+            scenario=payload.scenario,
+            nominal_coverage=payload.nominal_coverage,
+            metrics=scen_data,
+        )

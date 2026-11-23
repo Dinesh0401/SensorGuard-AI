@@ -416,7 +416,16 @@ class SAGEForecaster(BaseForecaster):
 
     def predict_all_scenarios(self, X: pd.DataFrame) -> dict[float, tuple[np.ndarray, np.ndarray]]:
         """Generate prediction intervals across all gamma values in config.gamma_grid."""
-        return {gamma: self.predict_scenario(X, gamma) for gamma in self.config.gamma_grid}
+        pred = self.predict(X)
+        res: dict[float, tuple[np.ndarray, np.ndarray]] = {}
+        for gamma in self.config.gamma_grid:
+            half_width = self.scenario_half_widths.get(
+                gamma, float(self.sigma_res + gamma * (self.sigma_res / 2.0))
+            )
+            lower = np.clip(pred - half_width, 0.0, None)
+            upper = pred + half_width
+            res[gamma] = (lower, upper)
+        return res
 
     def predict_interval(
         self, X: pd.DataFrame, nominal_coverage: float = 0.90
