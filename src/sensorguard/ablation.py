@@ -213,8 +213,7 @@ def prepare_scenario_test_data(
             idw_values.append(idw)
         rebuilt_df["neighbor_idw_pm25"] = idw_values
     else:
-        if "neighbor_idw_pm25" in rebuilt_df.columns:
-            rebuilt_df["neighbor_idw_pm25"] = rebuilt_df["last_pm25"]
+        rebuilt_df["neighbor_idw_pm25"] = rebuilt_df["last_pm25"]
 
     rebuilt_df = rebuilt_df.drop(columns=["is_outage"], errors="ignore")
 
