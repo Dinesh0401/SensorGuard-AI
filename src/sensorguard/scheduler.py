@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from sensorguard.db.schema import Observation, Sensor, Station
 from sensorguard.db.session import create_db_engine, get_session_factory
-from sensorguard.ingest import OpenAQIngestionPipeline
+from sensorguard.ingest import IngestionPipeline
 from sensorguard.providers import OpenAQClient
 
 logger = logging.getLogger(__name__)

@@ -87,22 +87,40 @@ def prepare_scenario_test_data(
             & (scenario_test["timestamp"] < t_max)
         ).to_numpy()
 
-    # Apply outage mask: marked observations did not arrive
-    scenario_test["is_outage"] = outage_mask
+    # Explicitly drop all precomputed feature columns upfront so it is mathematically
+    # impossible for pre-existing or poisoned values to leak into the reconstructed features.
+    reconstructed_cols = [
+        "last_pm25",
+        "lag_1h",
+        "lag_2h",
+        "lag_24h",
+        "rolling_mean_6h",
+        "rolling_std_6h",
+        "rolling_mean_24h",
+        "neighbor_idw_pm25",
+        "age_hours",
+    ]
+    clean_test = scenario_test.drop(columns=reconstructed_cols, errors="ignore").copy()
+    clean_test["is_outage"] = outage_mask
+
+    if history_df is not None and not history_df.empty:
+        clean_hist = history_df.drop(columns=reconstructed_cols, errors="ignore").copy()
+        clean_hist["is_outage"] = False
+    else:
+        clean_hist = pd.DataFrame()
 
     # Rebuild spatiotemporal features per station strictly from visible measurements
-    all_stations = sorted(scenario_test["station_id"].unique())
+    all_stations = sorted(clean_test["station_id"].unique())
     rebuilt_frames = []
 
     for s_id in all_stations:
-        st_test = scenario_test[scenario_test["station_id"] == s_id].sort_values("timestamp").copy()
+        st_test = clean_test[clean_test["station_id"] == s_id].sort_values("timestamp").copy()
 
-        # If history is available for this station, prepend for warmup continuity
-        if history_df is not None and not history_df.empty:
-            st_hist = history_df[history_df["station_id"] == s_id].sort_values("timestamp").copy()
-            st_hist["is_outage"] = False
-            combined = pd.concat([st_hist, st_test], ignore_index=True)
+        # Prepend full unpoisoned historical timeline for this station
+        if not clean_hist.empty and (clean_hist["station_id"] == s_id).any():
+            st_hist = clean_hist[clean_hist["station_id"] == s_id].sort_values("timestamp").copy()
             n_hist = len(st_hist)
+            combined = pd.concat([st_hist, st_test], ignore_index=True)
         else:
             combined = st_test
             n_hist = 0
@@ -113,20 +131,38 @@ def prepare_scenario_test_data(
         )
         visible_series = combined["target"].where(is_reported)
 
+        # Reconstruct temporal features strictly from past visible measurements
         last_val = visible_series.ffill().shift(1)
-        combined["last_pm25"] = last_val.fillna(combined["last_pm25"])
-        combined["lag_1h"] = visible_series.ffill().shift(2).fillna(combined["lag_1h"])
-        combined["lag_2h"] = visible_series.ffill().shift(3).fillna(combined["lag_2h"])
-        combined["lag_24h"] = visible_series.ffill().shift(24).fillna(combined["lag_24h"])
+        combined["last_pm25"] = last_val
+        combined["lag_1h"] = visible_series.ffill().shift(2)
+        combined["lag_2h"] = visible_series.ffill().shift(3)
+        combined["lag_24h"] = visible_series.ffill().shift(24)
 
-        combined["rolling_mean_6h"] = combined["last_pm25"].rolling(6, min_periods=1).mean()
-        combined["rolling_std_6h"] = combined["last_pm25"].rolling(6, min_periods=2).std().fillna(0.0)
-        combined["rolling_mean_24h"] = combined["last_pm25"].rolling(24, min_periods=1).mean()
+        combined["rolling_mean_6h"] = last_val.rolling(6, min_periods=1).mean()
+        combined["rolling_std_6h"] = last_val.rolling(6, min_periods=2).std().fillna(0.0)
+        combined["rolling_mean_24h"] = last_val.rolling(24, min_periods=1).mean()
 
         visible_time = combined["timestamp"].where(is_reported)
         last_time = visible_time.ffill().shift(1)
         calc_age = (combined["timestamp"] - last_time).dt.total_seconds() / 3600.0
-        combined["age_hours"] = calc_age.fillna(combined["age_hours"] + 1.0)
+        combined["age_hours"] = calc_age
+
+        # If station starts cold (e.g. standalone test fixture without prior history),
+        # fill remaining initial NaNs strictly from earliest visible observation or train_mean.
+        # NEVER from precomputed columns (which were dropped upfront).
+        if combined["last_pm25"].isna().any():
+            first_vis = (
+                combined["last_pm25"].dropna().iloc[0]
+                if not combined["last_pm25"].dropna().empty
+                else train_mean
+            )
+            combined["last_pm25"] = combined["last_pm25"].fillna(first_vis)
+            combined["lag_1h"] = combined["lag_1h"].fillna(combined["last_pm25"])
+            combined["lag_2h"] = combined["lag_2h"].fillna(combined["lag_1h"])
+            combined["lag_24h"] = combined["lag_24h"].fillna(combined["last_pm25"])
+            combined["rolling_mean_6h"] = combined["rolling_mean_6h"].fillna(combined["last_pm25"])
+            combined["rolling_mean_24h"] = combined["rolling_mean_24h"].fillna(combined["last_pm25"])
+            combined["age_hours"] = combined["age_hours"].fillna(1.0)
 
         # Slice back the test portion
         res_test = combined.iloc[n_hist:].copy()
@@ -310,7 +346,7 @@ def run_sage_ablation_suite(
                 train_mean=train_mean,
                 train_std=train_std,
                 station_coords=splits.station_coords,
-                history_df=cal_df.tail(48),
+                history_df=pd.concat([train_df, cal_df], ignore_index=True),
             )
 
             # Subgroup strata for group fairness
@@ -349,6 +385,7 @@ def run_sage_ablation_suite(
                     "condition": cond,
                     "n_total": m["n_total"],
                     "n_valid_eval": m["n_valid_eval"],
+                    "n_service_failures": m.get("n_service_failures", 0),
                     "n_published": m["n_published"],
                     "n_abstained": m["n_abstained"],
                     "mae": m["mae"],
@@ -356,6 +393,8 @@ def run_sage_ablation_suite(
                     "picp": m["picp"],
                     "overall_picp": m["overall_picp"],
                     "published_picp": m["published_picp"],
+                    "published_mae": m.get("published_mae"),
+                    "published_mpiw": m.get("published_mpiw"),
                     "mpiw": m["mpiw"],
                     "winkler_score": m["winkler_score"],
                     "worst_stratum_coverage_gap": m["worst_stratum_coverage_gap"],
@@ -380,12 +419,15 @@ def run_sage_ablation_suite(
                 "picp",
                 "overall_picp",
                 "published_picp",
+                "published_mae",
+                "published_mpiw",
                 "mpiw",
                 "winkler_score",
                 "worst_stratum_coverage_gap",
                 "abstention_rate",
                 "mean_disagreement",
                 "n_valid_eval",
+                "n_service_failures",
                 "n_published",
                 "n_abstained",
             ]:

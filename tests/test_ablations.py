@@ -197,3 +197,79 @@ def test_content_hash_deterministic(mock_dataset_splits: DatasetSplits) -> None:
     modified_splits.test.loc[0, "target"] += 50.0
     hash_mod = compute_dataset_content_hash(modified_splits)
     assert hash1 != hash_mod
+
+
+def test_adversarial_feature_poisoning_excluded(mock_dataset_splits: DatasetSplits) -> None:
+    """Adversarial regression test: prove poisoned precomputed features cannot leak into rebuilt features."""
+    test_df = mock_dataset_splits.test.copy()
+    # Deliberately poison precomputed columns with sentinel impossible values
+    poisoned_values = [999999.0, -888888.0, 777777.0, -666666.0, 555555.0, -444444.0, 333333.0, -111.0]
+    test_df["last_pm25"] = poisoned_values[0]
+    test_df["lag_1h"] = poisoned_values[1]
+    test_df["lag_2h"] = poisoned_values[2]
+    test_df["lag_24h"] = poisoned_values[3]
+    test_df["rolling_mean_6h"] = poisoned_values[4]
+    test_df["rolling_mean_24h"] = poisoned_values[5]
+    test_df["neighbor_idw_pm25"] = poisoned_values[6]
+    test_df["age_hours"] = poisoned_values[7]
+
+    train_mean = float(mock_dataset_splits.train["target"].mean())
+    train_std = float(mock_dataset_splits.train["target"].std())
+
+    # Rebuild under MCAR outage
+    scen_df, y_truth = prepare_scenario_test_data(
+        test_df=test_df,
+        scenario="mcar_20",
+        seed=42,
+        train_mean=train_mean,
+        train_std=train_std,
+        station_coords=mock_dataset_splits.station_coords,
+        history_df=mock_dataset_splits.calibrate,
+    )
+    assert len(y_truth) == len(scen_df)
+
+    # Prove that NONE of the poisoned values exist anywhere in rebuilt feature columns
+    rebuilt_cols = [
+        "last_pm25",
+        "lag_1h",
+        "lag_2h",
+        "lag_24h",
+        "rolling_mean_6h",
+        "rolling_mean_24h",
+        "neighbor_idw_pm25",
+        "age_hours",
+    ]
+    for col in rebuilt_cols:
+        col_vals = scen_df[col].to_numpy()
+        for p_val in poisoned_values:
+            assert not np.isclose(col_vals, p_val).any(), (
+                f"Adversarial leakage failure: poisoned value {p_val} found in rebuilt feature '{col}'!"
+            )
+
+
+def test_evaluation_invariants_service_failures_and_zeros() -> None:
+    """Verify evaluation invariants: service failure counting, sum identities, and zero-row handling."""
+    from sensorguard.calibration import compute_interval_metrics
+
+    # Invariant 1: Service failures count (valid target but failed forecast)
+    y_true = np.array([10.0, 15.0, 20.0, 25.0])
+    y_pred = np.array([10.5, np.nan, 19.8, np.inf])
+    lower = np.array([8.0, 12.0, 17.0, 20.0])
+    upper = np.array([12.0, 18.0, 23.0, 30.0])
+
+    m = compute_interval_metrics(y_true, y_pred, lower, upper)
+    assert m["n_total"] == 4
+    assert m["n_valid_target"] == 4
+    assert m["n_valid_forecast"] == 2
+    assert m["n_valid_eval"] == 2
+    assert m["n_service_failures"] == 2
+    assert m["n_published"] + m["n_abstained"] == m["n_valid_eval"]
+
+    # Invariant 2: Zero-valid rows return clean unavailable metrics
+    y_nan = np.full(5, np.nan)
+    p_ones = np.ones(5)
+    m_zero = compute_interval_metrics(y_nan, p_ones, p_ones, p_ones)
+    assert m_zero["n_valid_eval"] == 0
+    assert m_zero["picp"] is None
+    assert m_zero["published_picp"] is None
+    assert m_zero["mae"] is None

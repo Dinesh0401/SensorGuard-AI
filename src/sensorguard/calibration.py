@@ -256,6 +256,7 @@ def compute_interval_metrics(
     n_published = int(pub_val.sum())
     n_abstained = int((~pub_val).sum())
     abstention_rate = float((~pub_val).mean())
+    n_service_failures = max(0, n_valid_target - n_valid_eval)
 
     covered = (y_val >= l_val) & (y_val <= u_val)
     overall_picp = float(covered.mean())
@@ -263,8 +264,12 @@ def compute_interval_metrics(
 
     if n_published > 0:
         published_picp = float(covered[pub_val].mean())
+        published_mae = float(np.mean(np.abs(y_val[pub_val] - p_val[pub_val])))
+        published_mpiw = float(np.mean(u_val[pub_val] - l_val[pub_val]))
     else:
         published_picp = None
+        published_mae = None
+        published_mpiw = None
 
     mae = float(np.mean(np.abs(y_val - p_val)))
     rmse = float(np.sqrt(np.mean((y_val - p_val) ** 2)))
@@ -296,6 +301,7 @@ def compute_interval_metrics(
         "n_valid_target": n_valid_target,
         "n_valid_forecast": n_valid_forecast,
         "n_valid_eval": n_valid_eval,
+        "n_service_failures": n_service_failures,
         "n_samples": n_valid_eval,
         "n_published": n_published,
         "n_abstained": n_abstained,
@@ -305,6 +311,8 @@ def compute_interval_metrics(
         "picp": round(overall_picp, 4),
         "overall_picp": round(overall_picp, 4),
         "published_picp": round(published_picp, 4) if published_picp is not None else None,
+        "published_mae": round(published_mae, 4) if published_mae is not None else None,
+        "published_mpiw": round(published_mpiw, 4) if published_mpiw is not None else None,
         "coverage_gap": round(abs(overall_picp - nominal_coverage), 4),
         "mpiw": round(mpiw, 4),
         "winkler_score": round(winkler, 4),
