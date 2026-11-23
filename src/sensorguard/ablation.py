@@ -147,22 +147,18 @@ def prepare_scenario_test_data(
         calc_age = (combined["timestamp"] - last_time).dt.total_seconds() / 3600.0
         combined["age_hours"] = calc_age
 
-        # If station starts cold (e.g. standalone test fixture without prior history),
-        # fill remaining initial NaNs strictly from earliest visible observation or train_mean.
-        # NEVER from precomputed columns (which were dropped upfront).
+        # Pure causal cold-start handling: when no prior historical observation exists,
+        # use strictly point-in-time training priors. Future observations are NEVER accessed.
+        # age_hours is set to 999.0 to enforce safety abstention during cold start.
         if combined["last_pm25"].isna().any():
-            first_vis = (
-                combined["last_pm25"].dropna().iloc[0]
-                if not combined["last_pm25"].dropna().empty
-                else train_mean
-            )
-            combined["last_pm25"] = combined["last_pm25"].fillna(first_vis)
-            combined["lag_1h"] = combined["lag_1h"].fillna(combined["last_pm25"])
-            combined["lag_2h"] = combined["lag_2h"].fillna(combined["lag_1h"])
-            combined["lag_24h"] = combined["lag_24h"].fillna(combined["last_pm25"])
-            combined["rolling_mean_6h"] = combined["rolling_mean_6h"].fillna(combined["last_pm25"])
-            combined["rolling_mean_24h"] = combined["rolling_mean_24h"].fillna(combined["last_pm25"])
-            combined["age_hours"] = combined["age_hours"].fillna(1.0)
+            combined["last_pm25"] = combined["last_pm25"].fillna(train_mean)
+            combined["lag_1h"] = combined["lag_1h"].fillna(train_mean)
+            combined["lag_2h"] = combined["lag_2h"].fillna(train_mean)
+            combined["lag_24h"] = combined["lag_24h"].fillna(train_mean)
+            combined["rolling_mean_6h"] = combined["rolling_mean_6h"].fillna(train_mean)
+            combined["rolling_std_6h"] = combined["rolling_std_6h"].fillna(0.0)
+            combined["rolling_mean_24h"] = combined["rolling_mean_24h"].fillna(train_mean)
+            combined["age_hours"] = combined["age_hours"].fillna(999.0)
 
         # Slice back the test portion
         res_test = combined.iloc[n_hist:].copy()

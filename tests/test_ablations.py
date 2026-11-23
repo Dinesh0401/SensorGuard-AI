@@ -273,3 +273,78 @@ def test_evaluation_invariants_service_failures_and_zeros() -> None:
     assert m_zero["picp"] is None
     assert m_zero["published_picp"] is None
     assert m_zero["mae"] is None
+
+
+def test_adversarial_cold_start_no_future_leakage() -> None:
+    """Adversarial test: prove future measurements cannot backfill cold-start feature rows."""
+    count = 20
+    dates = pd.date_range("2024-01-01", periods=count, freq="1h", tz="UTC")
+    train_mean = 14.5
+    train_std = 3.2
+
+    # Station st_cold starts with 6 missing hours (0..5), first measurement is at hour 6
+    def create_cold_df(first_measurement_val: float) -> pd.DataFrame:
+        targets = np.full(count, np.nan)
+        reported = np.full(count, False)
+        # Hour 6 onwards are reported
+        targets[6:] = np.linspace(first_measurement_val, first_measurement_val + 5.0, count - 6)
+        reported[6:] = True
+
+        return pd.DataFrame(
+            {
+                "station_id": ["st_cold"] * count,
+                "timestamp": dates,
+                "target": targets,
+                "reported": reported,
+                "hour_sin": np.sin(2 * np.pi * np.arange(count) / 24),
+                "hour_cos": np.cos(2 * np.pi * np.arange(count) / 24),
+                "dow_sin": np.zeros(count),
+                "dow_cos": np.ones(count),
+            }
+        )
+
+    df_a = create_cold_df(first_measurement_val=15.0)
+    df_b = create_cold_df(first_measurement_val=9999.0)  # Extreme future value
+
+    scen_a, _ = prepare_scenario_test_data(
+        test_df=df_a,
+        scenario="mcar_20",
+        seed=42,
+        train_mean=train_mean,
+        train_std=train_std,
+        history_df=None,  # Pure cold start
+    )
+
+    scen_b, _ = prepare_scenario_test_data(
+        test_df=df_b,
+        scenario="mcar_20",
+        seed=42,
+        train_mean=train_mean,
+        train_std=train_std,
+        history_df=None,  # Pure cold start
+    )
+
+    # For all hours prior to hour 6 (hours 0..5), modifying the future observation
+    # MUST NOT alter any feature values!
+    feature_cols = [
+        "last_pm25",
+        "lag_1h",
+        "lag_2h",
+        "lag_24h",
+        "rolling_mean_6h",
+        "rolling_std_6h",
+        "rolling_mean_24h",
+        "neighbor_idw_pm25",
+        "age_hours",
+    ]
+    for col in feature_cols:
+        vals_a = scen_a.iloc[:6][col].to_numpy()
+        vals_b = scen_b.iloc[:6][col].to_numpy()
+        assert np.array_equal(vals_a, vals_b), (
+            f"Future leakage detected in '{col}': modifying future measurement at t=6 "
+            f"altered feature values at t < 6!"
+        )
+        if col in ["last_pm25", "lag_1h", "rolling_mean_6h"]:
+            assert np.allclose(vals_a, train_mean), "Cold-start row did not use causal prior train_mean!"
+        if col == "age_hours":
+            assert (vals_a >= 12.0).all(), "Cold-start age_hours failed to indicate staleness!"
