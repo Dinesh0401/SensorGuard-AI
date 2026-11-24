@@ -528,6 +528,14 @@ def get_station_forecasts(
 
     # Load recent observations from in-memory cached features for sub-50ms latency
     featured_df, _ = get_cached_pilot_features(db)
+    if featured_df.empty or "station_id" not in featured_df.columns:
+        return StationForecastsResponse(
+            station_id=station.id,
+            station_name=station.name,
+            current_status="abstain",
+            latest_forecast=None,
+            forecasts=[],
+        )
     st_df = (
         featured_df[featured_df["station_id"] == str(station_id)].sort_values("timestamp").tail(limit).copy()
     )
