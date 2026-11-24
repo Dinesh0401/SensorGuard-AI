@@ -280,6 +280,7 @@ def test_sub_50ms_forecast_latency():
 def test_admin_concurrency_lock():
     """Verify admin operations respect execution lock for concurrency safety."""
     import asyncio
+
     from sensorguard.api import _ADMIN_EXECUTION_LOCK
 
     async def _test():
