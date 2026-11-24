@@ -161,29 +161,40 @@ def verify_model_sha256(path: Path) -> bool:
 def get_cached_pilot_features(session: Session) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
     """Retrieve pre-computed spatiotemporal features for Q1 2024 pilot data with sub-millisecond access."""
     global _CACHED_FEATURE_DF, _CACHED_STATION_COORDS, _CACHED_STATION_LATEST, _CACHED_MAX_DB_TIME
-    if _CACHED_FEATURE_DF is not None and _CACHED_STATION_COORDS is not None:
+    if _CACHED_FEATURE_DF is not None and not _CACHED_FEATURE_DF.empty and _CACHED_STATION_COORDS is not None:
         return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
     logger.info("Building in-memory cached spatiotemporal feature matrix for sub-50ms API latency...")
-    df, station_coords = load_pilot_dataset_from_db(session)
-    featured_df = build_spatiotemporal_features(df, station_coords)
-    _CACHED_FEATURE_DF = featured_df
-    _CACHED_STATION_COORDS = station_coords
+    try:
+        df, station_coords = load_pilot_dataset_from_db(session)
+        featured_df = build_spatiotemporal_features(df, station_coords)
+        _CACHED_FEATURE_DF = featured_df
+        _CACHED_STATION_COORDS = station_coords
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not build pilot feature cache from DB: %s", e)
+        _CACHED_FEATURE_DF = pd.DataFrame()
+        _CACHED_STATION_COORDS = {}
+        _CACHED_STATION_LATEST = {}
+        _CACHED_MAX_DB_TIME = datetime.now(UTC)
+        return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
     max_db_raw = session.scalar(select(func.max(Observation.observed_at)))
     _CACHED_MAX_DB_TIME = _ensure_utc(max_db_raw) or datetime.now(UTC)
 
     # Pre-cache latest observation per station
     latest_by_station: dict[int, tuple[datetime | None, float | None]] = {}
-    obs_rows = session.execute(
-        select(Sensor.station_id, Observation.observed_at, Observation.value)
-        .join(Observation, Observation.sensor_id == Sensor.id)
-        .where(Sensor.parameter == "pm25")
-        .order_by(desc(Observation.observed_at))
-    ).all()
-    for st_id, obs_dt, val in obs_rows:
-        if st_id not in latest_by_station:
-            latest_by_station[st_id] = (obs_dt, val)
+    try:
+        obs_rows = session.execute(
+            select(Sensor.station_id, Observation.observed_at, Observation.value)
+            .join(Observation, Observation.sensor_id == Sensor.id)
+            .where(Sensor.parameter == "pm25")
+            .order_by(desc(Observation.observed_at))
+        ).all()
+        for st_id, obs_dt, val in obs_rows:
+            if st_id not in latest_by_station:
+                latest_by_station[st_id] = (obs_dt, val)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not populate latest station observation cache: %s", e)
     _CACHED_STATION_LATEST = latest_by_station
 
     return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
@@ -212,6 +223,11 @@ def get_or_train_sage_model(session: Session) -> SAGEForecaster:
 
     logger.info("Initializing and training SAGE model for inference...")
     featured_df, station_coords = get_cached_pilot_features(session)
+    if featured_df.empty or len(featured_df) < 50:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Pilot feature dataset unavailable in database to fit SAGE model",
+        )
     splits = partition_dataset(featured_df, station_coords, train_pct=0.60, cal_pct=0.20)
 
     cfg = SAGEConfig(
