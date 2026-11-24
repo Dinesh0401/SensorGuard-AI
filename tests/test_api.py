@@ -224,12 +224,13 @@ def test_admin_auth_and_endpoints(monkeypatch: pytest.MonkeyPatch):
     assert res_eval.json()["scenario"] == "natural"
 
 
-@pytest.mark.anyio
-async def test_scheduler_freshness_audit():
+def test_scheduler_freshness_audit():
     """Verify background scheduler audit and execution loop."""
+    import asyncio
+
     scheduler = IngestScheduler(config=SchedulerConfig(poll_interval_seconds=1))
     assert not scheduler.is_running
-    result = await scheduler.poll_once()
+    result = asyncio.run(scheduler.poll_once())
     assert "total_stations" in result
     assert scheduler.last_poll_status == "SUCCESS"
     assert scheduler.last_poll_time is not None
@@ -276,12 +277,15 @@ def test_sub_50ms_forecast_latency():
     assert mean_latency < 100.0, f"Mean latency {mean_latency:.2f}ms exceeded requirement"
 
 
-@pytest.mark.anyio
-async def test_admin_concurrency_lock():
+def test_admin_concurrency_lock():
     """Verify admin operations respect execution lock for concurrency safety."""
+    import asyncio
     from sensorguard.api import _ADMIN_EXECUTION_LOCK
 
-    assert not _ADMIN_EXECUTION_LOCK.locked()
-    async with _ADMIN_EXECUTION_LOCK:
-        assert _ADMIN_EXECUTION_LOCK.locked()
-    assert not _ADMIN_EXECUTION_LOCK.locked()
+    async def _test():
+        assert not _ADMIN_EXECUTION_LOCK.locked()
+        async with _ADMIN_EXECUTION_LOCK:
+            assert _ADMIN_EXECUTION_LOCK.locked()
+        assert not _ADMIN_EXECUTION_LOCK.locked()
+
+    asyncio.run(_test())
