@@ -24,6 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["anyio>=4.0", "pytest>=8,<10", "ruff>=0.6,<1"]
+postgres = ["psycopg2-binary>=2.9,<3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
