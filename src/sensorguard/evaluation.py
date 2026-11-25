@@ -34,7 +34,7 @@ from sensorguard.calibration import (
     compute_interval_metrics,
     policy,
 )
-from sensorguard.models.data import DatasetSplits, partition_dataset
+from sensorguard.models.data import DatasetSplits, compute_dataset_content_hash, partition_dataset
 from sensorguard.models.forecasters import (
     BaseForecaster,
     LightGBMPointForecaster,
@@ -133,10 +133,8 @@ def run_benchmark_suite(
     sage_g0 = SAGEForecaster(config=sage_g0_cfg, feature_columns=feature_cols)
     sage_g0.fit(X=train_df, y=train_df["target"].to_numpy(), X_cal=cal_df, y_cal=y_cal)
 
-    # Dataset lineage hash
-    data_hash = hashlib.sha256(
-        (str(len(train_df)) + str(len(cal_df)) + str(len(test_df))).encode("utf-8")
-    ).hexdigest()[:16]
+    # Dataset lineage hash (consistent across benchmarks, ablations, and manifest)
+    data_hash = compute_dataset_content_hash(splits)
 
     benchmark_summary: dict[str, Any] = {
         "benchmark_id": f"SG-BENCH-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",

@@ -313,3 +313,41 @@ class IngestScheduler:
     def stop(self) -> None:
         """Signal scheduler to gracefully shut down."""
         self._is_running = False
+
+
+def main() -> int:
+    """CLI entrypoint for running the SensorGuard background ingestion worker."""
+    import argparse
+    import sys
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    parser = argparse.ArgumentParser(description="SensorGuard AI background ingestion scheduler")
+    parser.add_argument("--once", action="store_true", help="Run a single polling cycle and exit")
+    parser.add_argument(
+        "--poll-interval-seconds",
+        type=int,
+        default=int(os.getenv("SCHEDULER_POLL_INTERVAL_SECONDS", "3600")),
+        help="Polling cadence in seconds (default 3600)",
+    )
+    args = parser.parse_args()
+
+    cfg = SchedulerConfig(
+        poll_interval_seconds=args.poll_interval_seconds,
+        enabled=True,
+        fetch_live_provider=os.getenv("ENABLE_LIVE_PROVIDER_FETCH", "false").lower() in ("1", "true"),
+    )
+    scheduler = IngestScheduler(config=cfg)
+    if args.once:
+        result = asyncio.run(scheduler.poll_once())
+        logger.info("Single scheduler cycle finished: %s", result.get("status"))
+        return 0 if result.get("status") != "FAILED" else 1
+
+    try:
+        asyncio.run(scheduler.run_loop())
+    except KeyboardInterrupt:
+        scheduler.stop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

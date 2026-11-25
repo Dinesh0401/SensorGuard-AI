@@ -30,6 +30,7 @@ from typing import Any
 import joblib
 import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -71,8 +72,20 @@ _admin_request_history: list[float] = []
 
 app = FastAPI(
     title="SensorGuard AI Pilot & Research API",
-    version="0.5.0",
+    version="0.5.3",
     description="Public pilot API for environmental sensor network forecasting, uncertainty quantification, and outage resilience.",
+)
+
+_default_cors_origins = "http://localhost:3000,http://127.0.0.1:3000"
+_cors_origins = [
+    origin.strip() for origin in os.getenv("CORS_ORIGINS", _default_cors_origins).split(",") if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
 )
 
 
@@ -823,7 +836,7 @@ def list_experiments() -> ExperimentListResponse:
                 ExperimentSummary(
                     experiment_id=b.get("benchmark_id", "SG-BENCH-M3"),
                     title="Milestone 3: Spatiotemporal Forecasters & Conformal Calibration",
-                    dataset_hash=b.get("dataset_hash", "7e8f2d316bee0c4f"),
+                    dataset_hash=b.get("dataset_hash", "33805c42097fc86e"),
                     nominal_coverage=b.get("nominal_coverage", 0.90),
                     models_evaluated=[
                         "persistence",
@@ -848,7 +861,7 @@ def list_experiments() -> ExperimentListResponse:
                 ExperimentSummary(
                     experiment_id=a.get("study_id", "SG-SAGE-M4"),
                     title="Milestone 4: SAGE Sensitivity & Guarded Policy Ablation Study",
-                    dataset_hash=a.get("dataset_hash", "7e8f2d316bee0c4f"),
+                    dataset_hash=a.get("dataset_hash", "33805c42097fc86e"),
                     nominal_coverage=a.get("nominal_coverage", 0.90),
                     models_evaluated=a.get("conditions", []),
                     scenarios_evaluated=a.get("scenarios", []),
