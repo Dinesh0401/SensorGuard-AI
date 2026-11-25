@@ -37,7 +37,7 @@ def generate_baseline_markdown(results: dict) -> str:
         "",
         f"**Benchmark ID:** `{results['benchmark_id']}`  ",
         f"**Dataset Hash:** `{results['dataset_hash']}`  ",
-        "**Evaluation Window:** Q1 2024 (8 verified UK AURN London monitoring stations)  ",
+        "**Evaluation Window:** Q1 2024 (8 verified UK AURN stations across Greater London and regional England)  ",
         f"**Observations:** {results['n_train']} train / {results['n_calibrate']} calibration / {results['n_test']} test  ",
         f"**Target Metric:** PM2.5 (+1 hour ahead, nominal coverage {results['nominal_coverage']:.0%})  ",
         "**Evaluation Denominator:** Unified finite-mask denominator across all metrics and regimes.  ",
@@ -155,6 +155,21 @@ def generate_baseline_markdown(results: dict) -> str:
                 f"| `{st_name}` | {st_data['n_test_samples']} | {st_data['persistence_mae']:.2f} | {pt_str} | {cqr_str} | {sg_str} |"
             )
 
+    nat = results["scenarios"].get("natural", {})
+    cqr_m = nat.get("lightgbm_quantile", {}).get("metrics", {})
+    pers_m = nat.get("persistence", {}).get("metrics", {})
+    sage_nat_m = nat.get("sage_full", {}).get("metrics", {})
+    mnar_m = results["scenarios"].get("mnar_gamma_1.5", {}).get("sage_full", {}).get("metrics", {})
+    burst_m = results["scenarios"].get("burst_24h", {}).get("sage_full", {}).get("metrics", {})
+
+    abs_rates = [
+        m.get("abstention_rate", 0.0)
+        for m in (sage_nat_m, mnar_m, burst_m)
+        if m.get("abstention_rate") is not None
+    ]
+    min_abs = min(abs_rates) if abs_rates else 0.0
+    max_abs = max(abs_rates) if abs_rates else 0.0
+
     lines.extend(
         [
             "",
@@ -163,18 +178,16 @@ def generate_baseline_markdown(results: dict) -> str:
             "## 5. Transparent Scientific Analysis & Honest Negative Findings",
             "",
             "### 5.1 When Conventional Methods Win (Sharpness under Exchangeability)",
-            "- Under calm, exchangeable data conditions (Natural and MCAR regimes), **LightGBM + CQR (Romano et al. 2019)** delivers the strongest operational trade-off:",
-            "  - Extremely tight mean interval width (**2.34 µg/m³** vs SAGE's 17.01 µg/m³).",
-            "  - Superior Winkler interval score (**3.51** vs SAGE's 17.06, where lower is better).",
-            "  - Satisfies nominal coverage (96.8% > 90.0% target).",
-            "- **Scientific Takeaway:** When sensor streams are reliable and exchangeability holds, conservative sensitivity envelopes are overly wide. We do NOT claim SAGE is universally superior to CQR for routine conditions.",
+            "- Under calm, exchangeable natural conditions, simpler conformal baselines deliver the sharpest intervals:",
+            f"  - **Persistence + Split Conformal:** Mean interval width **{pers_m.get('mpiw', 0.0):.2f} µg/m³**, Winkler score **{pers_m.get('winkler_score', 0.0):.2f}**, overall coverage **{pers_m.get('picp', 0.0):.1%}**.",
+            f"  - **LightGBM + CQR (Romano et al. 2019):** Mean interval width **{cqr_m.get('mpiw', 0.0):.2f} µg/m³**, Winkler score **{cqr_m.get('winkler_score', 0.0):.2f}**, overall coverage **{cqr_m.get('picp', 0.0):.1%}** (vs SAGE's **{sage_nat_m.get('mpiw', 0.0):.2f} µg/m³** / Winkler **{sage_nat_m.get('winkler_score', 0.0):.2f}**).",
+            "- **Scientific Takeaway:** When sensor streams are reliable and exchangeability holds, conservative sensitivity envelopes are unnecessarily wide. We do NOT claim SAGE outperforms CQR or Persistence on routine intervals.",
             "",
-            "### 5.2 When SAGE Delivers Value (Adversarial MNAR Outages & Guarded Abstention)",
+            "### 5.2 When SAGE Delivers Value (MNAR Sensitivity Enveloping & Guarded Abstention)",
             "- Under nonrandom missingness (`mnar_gamma_1.5`) and burst outages (`burst_24h`):",
-            "  - Conventional point calibrators assume missingness is uninformative and produce dangerously narrow intervals around outdated readings.",
-            "  - SAGE's sensitivity grid envelope expands dynamically as outage duration grows, bounding the distribution shift across hypothesized Gamma values.",
-            "  - When sensor staleness exceeds 12 hours or scenario disagreement exceeds tolerance, SAGE's **guarded policy explicitly abstains** (12.5% to 18.5% of queries).",
-            "  - On published queries, empirical coverage reaches **100.0%**, completely eliminating high-risk, false-precision forecasts during upstream sensor failures.",
+            "  - Conventional point/split conformal models assume missingness is uninformative or exchangeable.",
+            "  - SAGE separates scenario disagreement ($D_{\\text{sensitivity}} = \\max_\\gamma U_\\gamma - \\min_\\gamma U_\\gamma$) from envelope width ($W_{\\text{envelope}}$) and applies guarded abstention under synchronized threshold `max_disagreement_threshold = 8.0` and stale-history checks (`age_hours > 12.0`).",
+            f"  - Abstention scales strictly with data degradation (**{min_abs:.1%}** under natural data up to **{max_abs:.1%}** under MNAR/burst outages) while maintaining published empirical coverage of **{mnar_m.get('published_picp', 0.0):.1%}** under MNAR.",
             "",
             "### 5.3 Unified Denominator Invariant Verification",
             "- Under `sage_no_abstain` (where every forecast is published), `overall_picp == published_picp` exactly across all scenarios.",

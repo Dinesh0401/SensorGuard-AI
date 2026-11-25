@@ -73,10 +73,11 @@ def train_offline_pilot_model(
     cfg = SAGEConfig(
         gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
         nominal_coverage=nominal_coverage,
-        max_disagreement_threshold=20.0,
+        max_disagreement_threshold=8.0,
         min_effective_sample_size=15,
         stale_age_hours=12.0,
         caution_age_hours=3.0,
+        max_envelope_width_threshold=50.0,
     )
     model = SAGEForecaster(config=cfg, feature_columns=splits.feature_columns)
 
@@ -115,6 +116,8 @@ def train_offline_pilot_model(
             "n_stations": len(splits.station_coords),
             "feature_columns": splits.feature_columns,
             "gamma_grid": list(cfg.gamma_grid),
+            "max_disagreement_threshold": cfg.max_disagreement_threshold,
+            "max_envelope_width_threshold": cfg.max_envelope_width_threshold,
             "base_model_type": cfg.base_model_type,
         },
     )
