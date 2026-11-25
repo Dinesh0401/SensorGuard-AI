@@ -274,29 +274,32 @@ def test_postgres_scheduler_lock_recovery(pg_engine, tmp_path):
     factory = sessionmaker(bind=pg_engine, expire_on_commit=False)
     lock_path = tmp_path / "pg_scheduler.lock"
 
-    # First check with failing transport to verify lock is released on exception recovery
-    def failing_handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(503, json={"error": "upstream unavailable"})
-
     cfg = SchedulerConfig(
-        location_ids=[141],
-        max_consecutive_failures=2,
+        enabled=True,
+        fetch_live_provider=False,
+        max_retries=0,
         lock_file=str(lock_path),
     )
-    scheduler_fail = IngestScheduler(
-        session_factory=factory,
-        client=OpenAQClient(
-            api_key="test",
-            transport=httpx.MockTransport(failing_handler),
-            max_retries=0,
-        ),
-        config=cfg,
-    )
-    # Force non-empty sensor or simulate poll_once handling gracefully without dangling lock
-    with factory() as session:
-        any_sensor = session.scalars(select(Sensor).limit(1)).first()
-    summary = scheduler_fail.poll_once()
-    assert "polled_at" in summary
-    if any_sensor is not None:
-        assert summary["errors"] >= 0
+    scheduler = IngestScheduler(config=cfg, session_factory=factory)
+
+    # Normal poll succeeds and releases lock
+    ok_summary = asyncio.run(scheduler.poll_once())
+    assert ok_summary["status"] == "SUCCESS"
+    assert not lock_path.exists()
+
+    # Simulated failure inside freshness check must still release the inter-process file lock
+    orig_check = scheduler.check_network_freshness
+
+    def _boom(_session):
+        raise RuntimeError("simulated transient DB error")
+
+    scheduler.check_network_freshness = _boom  # type: ignore[method-assign]
+    err_summary = asyncio.run(scheduler.poll_once())
+    assert err_summary["status"] == "FAILED"
+    assert not lock_path.exists()
+
+    # Recovery poll immediately succeeds after failure
+    scheduler.check_network_freshness = orig_check  # type: ignore[method-assign]
+    rec_summary = asyncio.run(scheduler.poll_once())
+    assert rec_summary["status"] == "SUCCESS"
     assert not lock_path.exists()
