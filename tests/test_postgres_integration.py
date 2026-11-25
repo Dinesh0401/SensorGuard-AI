@@ -173,20 +173,22 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
             session.commit()
 
             replay = PointInTimeReplayEngine(session)
-            as_of_early = replay.query_as_of(
+            as_of_early, summary_early = replay.query_as_of(
                 [sensor.id],
                 decision_cutoff=datetime(2026, 2, 1, 13, 0, 0, tzinfo=UTC),
                 mode="prospective",
             )
             assert len(as_of_early) == 1
+            assert summary_early.total_visible_records == 1
             assert float(as_of_early.iloc[0]["value"]) == pytest.approx(14.2)
 
-            as_of_late = replay.query_as_of(
+            as_of_late, summary_late = replay.query_as_of(
                 [sensor.id],
                 decision_cutoff=datetime(2026, 2, 1, 16, 0, 0, tzinfo=UTC),
                 mode="prospective",
             )
             assert len(as_of_late) == 1
+            assert summary_late.total_visible_records == 1
             assert float(as_of_late.iloc[0]["value"]) == pytest.approx(19.8)
         finally:
             # Clean up synthetic station and raw batches so pilot dataset counts stay exact
