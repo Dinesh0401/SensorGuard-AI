@@ -1,0 +1,89 @@
+version: "3.9"
+
+# SensorGuard AI — multi-service compose
+# Services: PostgreSQL · FastAPI backend · Next.js frontend · Scheduler worker
+# Usage:
+#   cp .env.example .env   # fill in ADMIN_API_KEY and DB password
+#   docker compose up --build
+
+services:
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sensorguard
+      POSTGRES_USER: sensorguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sensorguard}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sensorguard -d sensorguard"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://sensorguard:${POSTGRES_PASSWORD:-sensorguard}@db:5432/sensorguard
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set in .env}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      ENABLE_LIVE_PROVIDER_FETCH: ${ENABLE_LIVE_PROVIDER_FETCH:-false}
+      ENABLE_INGEST_SCHEDULER: ${ENABLE_INGEST_SCHEDULER:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Next.js frontend ───────────────────────────────────────────────────────
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+
+  # ── Background scheduler worker ────────────────────────────────────────────
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"           # run-once; use cron / k8s CronJob in production
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://sensorguard:${POSTGRES_PASSWORD:-sensorguard}@db:5432/sensorguard
+      ADMIN_API_KEY: ${ADMIN_API_KEY}
+      ENABLE_LIVE_PROVIDER_FETCH: ${ENABLE_LIVE_PROVIDER_FETCH:-false}
+    command: ["python", "-m", "sensorguard.scheduler", "--once"]
+    profiles:
+      - scheduler   # only starts with: docker compose --profile scheduler up
+
+volumes:
+  pg_data:
