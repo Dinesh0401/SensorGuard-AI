@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import secrets
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
@@ -172,11 +173,15 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
 
 
 # Global in-memory cache and disk persistence for trained SAGE model
+_CACHE_LOCK = threading.RLock()
 _CACHED_SAGE_MODEL: SAGEForecaster | None = None
 _CACHED_MODEL_LOAD_TIME: float = 0.0
 _CACHED_FEATURE_DF: pd.DataFrame | None = None
 _CACHED_STATION_COORDS: dict[str, tuple[float, float]] | None = None
 _CACHED_STATION_LATEST: dict[int, tuple[datetime | None, float | None]] | None = None
+_CACHED_STATION_SLICES: dict[int, pd.DataFrame] | None = None
+_CACHED_STATION_NAMES: dict[int, str] | None = None
+_CACHED_FORECAST_RESPONSES: dict[tuple[int, int, int], StationForecastsResponse] = {}
 _CACHED_MAX_DB_TIME: datetime | None = None
 _ADMIN_EXECUTION_LOCK = asyncio.Lock()
 
@@ -190,10 +195,15 @@ EXPECTED_MODEL_SHA256 = "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440
 def invalidate_pilot_feature_cache() -> None:
     """Clear cached in-memory spatiotemporal feature matrices and station metadata."""
     global _CACHED_FEATURE_DF, _CACHED_STATION_COORDS, _CACHED_STATION_LATEST, _CACHED_MAX_DB_TIME
-    _CACHED_FEATURE_DF = None
-    _CACHED_STATION_COORDS = None
-    _CACHED_STATION_LATEST = None
-    _CACHED_MAX_DB_TIME = None
+    global _CACHED_STATION_SLICES, _CACHED_STATION_NAMES
+    with _CACHE_LOCK:
+        _CACHED_FEATURE_DF = None
+        _CACHED_STATION_COORDS = None
+        _CACHED_STATION_LATEST = None
+        _CACHED_STATION_SLICES = None
+        _CACHED_STATION_NAMES = None
+        _CACHED_FORECAST_RESPONSES.clear()
+        _CACHED_MAX_DB_TIME = None
     logger.info("Pilot feature and station observation cache invalidated.")
 
 
@@ -229,43 +239,76 @@ def verify_model_sha256(path: Path | None = None) -> bool:
 def get_cached_pilot_features(session: Session) -> tuple[pd.DataFrame, dict[str, tuple[float, float]]]:
     """Retrieve pre-computed spatiotemporal features for Q1 2024 pilot data with sub-millisecond access."""
     global _CACHED_FEATURE_DF, _CACHED_STATION_COORDS, _CACHED_STATION_LATEST, _CACHED_MAX_DB_TIME
+    global _CACHED_STATION_SLICES, _CACHED_STATION_NAMES
     if _CACHED_FEATURE_DF is not None and not _CACHED_FEATURE_DF.empty and _CACHED_STATION_COORDS is not None:
         return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
-    logger.info("Building in-memory cached spatiotemporal feature matrix for sub-50ms API latency...")
-    try:
-        df, station_coords = load_pilot_dataset_from_db(session)
-        featured_df = build_spatiotemporal_features(df, station_coords)
-        _CACHED_FEATURE_DF = featured_df
-        _CACHED_STATION_COORDS = station_coords
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not build pilot feature cache from DB: %s", e)
-        _CACHED_FEATURE_DF = pd.DataFrame()
-        _CACHED_STATION_COORDS = {}
-        _CACHED_STATION_LATEST = {}
-        _CACHED_MAX_DB_TIME = datetime.now(UTC)
+    with _CACHE_LOCK:
+        if (
+            _CACHED_FEATURE_DF is not None
+            and not _CACHED_FEATURE_DF.empty
+            and _CACHED_STATION_COORDS is not None
+        ):
+            return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
+
+        logger.info("Building in-memory cached spatiotemporal feature matrix for sub-50ms API latency...")
+        try:
+            df, station_coords = load_pilot_dataset_from_db(session)
+            featured_df = build_spatiotemporal_features(df, station_coords)
+            slices: dict[int, pd.DataFrame] = {}
+            if not featured_df.empty and "station_id" in featured_df.columns:
+                for st_key, grp in featured_df.groupby(featured_df["station_id"].astype(str), sort=False):
+                    slices[int(st_key)] = grp.sort_values("timestamp").reset_index(drop=True)
+            station_names = {s.id: s.name for s in session.scalars(select(Station)).all()}
+            _CACHED_FEATURE_DF = featured_df
+            _CACHED_STATION_COORDS = station_coords
+            _CACHED_STATION_SLICES = slices
+            _CACHED_STATION_NAMES = station_names
+            _CACHED_FORECAST_RESPONSES.clear()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not build pilot feature cache from DB: %s", e)
+            _CACHED_FEATURE_DF = pd.DataFrame()
+            _CACHED_STATION_COORDS = {}
+            _CACHED_STATION_LATEST = {}
+            _CACHED_STATION_SLICES = {}
+            _CACHED_STATION_NAMES = {}
+            _CACHED_FORECAST_RESPONSES.clear()
+            _CACHED_MAX_DB_TIME = datetime.now(UTC)
+            return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
+
+        max_db_raw = session.scalar(select(func.max(Observation.observed_at)))
+        _CACHED_MAX_DB_TIME = _ensure_utc(max_db_raw) or datetime.now(UTC)
+
+        # Pre-cache latest observation per station using grouped SQL max instead of scanning all rows
+        latest_by_station: dict[int, tuple[datetime | None, float | None]] = {}
+        try:
+            latest_obs_subq = (
+                select(
+                    Observation.sensor_id,
+                    func.max(Observation.observed_at).label("max_obs_at"),
+                )
+                .group_by(Observation.sensor_id)
+                .subquery()
+            )
+            obs_rows = session.execute(
+                select(Sensor.station_id, Observation.observed_at, Observation.value)
+                .join(Observation, Observation.sensor_id == Sensor.id)
+                .join(
+                    latest_obs_subq,
+                    (Observation.sensor_id == latest_obs_subq.c.sensor_id)
+                    & (Observation.observed_at == latest_obs_subq.c.max_obs_at),
+                )
+                .where(Sensor.parameter == "pm25")
+                .order_by(desc(Observation.version))
+            ).all()
+            for st_id, obs_dt, val in obs_rows:
+                if st_id not in latest_by_station:
+                    latest_by_station[st_id] = (obs_dt, val)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not populate latest station observation cache: %s", e)
+        _CACHED_STATION_LATEST = latest_by_station
+
         return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
-
-    max_db_raw = session.scalar(select(func.max(Observation.observed_at)))
-    _CACHED_MAX_DB_TIME = _ensure_utc(max_db_raw) or datetime.now(UTC)
-
-    # Pre-cache latest observation per station
-    latest_by_station: dict[int, tuple[datetime | None, float | None]] = {}
-    try:
-        obs_rows = session.execute(
-            select(Sensor.station_id, Observation.observed_at, Observation.value)
-            .join(Observation, Observation.sensor_id == Sensor.id)
-            .where(Sensor.parameter == "pm25")
-            .order_by(desc(Observation.observed_at))
-        ).all()
-        for st_id, obs_dt, val in obs_rows:
-            if st_id not in latest_by_station:
-                latest_by_station[st_id] = (obs_dt, val)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not populate latest station observation cache: %s", e)
-    _CACHED_STATION_LATEST = latest_by_station
-
-    return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
 
 def get_serving_model(session: Session | None = None) -> SAGEForecaster:
@@ -307,6 +350,11 @@ def get_serving_model(session: Session | None = None) -> SAGEForecaster:
     try:
         logger.info("Loading cryptographically verified SAGE model from %s...", MODEL_PATH)
         model = joblib.load(MODEL_PATH)
+        # Avoid LightGBM OpenMP multi-thread spin-up overhead on small online batches
+        if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+            inner = model.base_model.model
+            if hasattr(inner, "set_params"):
+                inner.set_params(n_jobs=1)
         _CACHED_SAGE_MODEL = model
         _CACHED_MODEL_LOAD_TIME = time.time()
         return model
@@ -655,39 +703,60 @@ def get_station_forecasts(
     db: Session = Depends(get_db),
 ) -> StationForecastsResponse:
     """Issue point and conservative interval forecasts with guarded abstention decisions."""
-    station = db.get(Station, station_id)
-    if not station:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found")
+    model = get_serving_model()
 
-    # Load recent observations from in-memory cached features for sub-50ms latency
+    # Fast path: serve immutable cached prediction response when feature cache is warm
+    with _CACHE_LOCK:
+        cached_name = _CACHED_STATION_NAMES.get(station_id) if _CACHED_STATION_NAMES else None
+        cache_key = (station_id, limit, id(model))
+        if cached_name is not None and cache_key in _CACHED_FORECAST_RESPONSES:
+            return _CACHED_FORECAST_RESPONSES[cache_key]
+
+    station_name = cached_name
+    if station_name is None:
+        station = db.get(Station, station_id)
+        if not station:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found"
+            )
+        station_name = station.name
+
+    # Load or reuse pre-indexed station feature slice without full-DataFrame equality scans
     featured_df, _ = get_cached_pilot_features(db)
-    if featured_df.empty or "station_id" not in featured_df.columns:
-        return StationForecastsResponse(
-            station_id=station.id,
-            station_name=station.name,
-            current_status="abstain",
-            latest_forecast=None,
-            forecasts=[],
+    with _CACHE_LOCK:
+        cached_resp = _CACHED_FORECAST_RESPONSES.get((station_id, limit, id(model)))
+        if cached_resp is not None:
+            return cached_resp
+        pre_slice = _CACHED_STATION_SLICES.get(station_id) if _CACHED_STATION_SLICES else None
+
+    if pre_slice is not None:
+        st_df = pre_slice.tail(limit)
+    elif not featured_df.empty and "station_id" in featured_df.columns:
+        st_df = (
+            featured_df[featured_df["station_id"].astype(str) == str(station_id)]
+            .sort_values("timestamp")
+            .tail(limit)
         )
-    st_df = (
-        featured_df[featured_df["station_id"] == str(station_id)].sort_values("timestamp").tail(limit).copy()
-    )
+    else:
+        st_df = pd.DataFrame()
 
     if st_df.empty:
         return StationForecastsResponse(
-            station_id=station.id,
-            station_name=station.name,
+            station_id=station_id,
+            station_name=station_name,
             current_status="abstain",
             latest_forecast=None,
             forecasts=[],
         )
 
-    model = get_serving_model()
     res = model.predict_guarded(st_df)
 
     forecast_records: list[ForecastRecord] = []
     timestamps = st_df["timestamp"].tolist()
     age_hours_list = st_df["age_hours"].tolist()
+    sorted_gammas = sorted(res.gamma_intervals.keys())
+    model_ver = f"SAGE-{model.config.base_model_type.upper()}-v1"
+    nom_cov = model.config.nominal_coverage
 
     for idx in range(len(st_df)):
         t_cutoff = _ensure_utc(timestamps[idx]) or timestamps[idx]
@@ -700,18 +769,18 @@ def get_station_forecasts(
                 lower=round(float(res.gamma_intervals[g][0][idx]), 2),
                 upper=round(float(res.gamma_intervals[g][1][idx]), 2),
             )
-            for g in sorted(res.gamma_intervals.keys())
+            for g in sorted_gammas
         ]
 
         rec = ForecastRecord(
-            station_id=station.id,
+            station_id=station_id,
             decision_cutoff=t_cutoff,
             target_time=t_target,
             point_forecast=round(float(res.point_forecast[idx]), 2),
             lower_bound=round(float(res.lower_envelope[idx]), 2),
             upper_bound=round(float(res.upper_envelope[idx]), 2),
-            nominal_coverage=model.config.nominal_coverage,
-            model_version=f"SAGE-{model.config.base_model_type.upper()}-v1",
+            nominal_coverage=nom_cov,
+            model_version=model_ver,
             status=str(res.status[idx]),
             abstain_reason=str(res.reason[idx]),
             is_stale=bool(age > 3.0),
@@ -723,13 +792,17 @@ def get_station_forecasts(
     latest = forecast_records[-1] if forecast_records else None
     current_status = latest.status if latest else "abstain"
 
-    return StationForecastsResponse(
-        station_id=station.id,
-        station_name=station.name,
+    response = StationForecastsResponse(
+        station_id=station_id,
+        station_name=station_name,
         current_status=current_status,
         latest_forecast=latest,
         forecasts=forecast_records,
     )
+    with _CACHE_LOCK:
+        if _CACHED_STATION_NAMES is not None and station_id in _CACHED_STATION_NAMES:
+            _CACHED_FORECAST_RESPONSES[(station_id, limit, id(model))] = response
+    return response
 
 
 @app.get(

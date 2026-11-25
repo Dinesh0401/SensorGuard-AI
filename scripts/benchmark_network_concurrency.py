@@ -238,6 +238,12 @@ def main() -> int:
         default=Path("docs/audit/network_benchmark_results.json"),
         help="Output JSON destination path",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Uvicorn worker count when spawning server locally (default: 1)",
+    )
     args = parser.parse_args()
 
     server_process: subprocess.Popen | None = None
@@ -246,7 +252,7 @@ def main() -> int:
     if not base_url:
         port = args.port or find_available_port(8000)
         base_url = f"http://127.0.0.1:{port}"
-        logger.info("Spawning real Uvicorn server on %s...", base_url)
+        logger.info("Spawning real Uvicorn server on %s (workers=%d)...", base_url, args.workers)
         env = {**os.environ, "PYTHONPATH": str(Path("src").resolve())}
         cmd = [
             sys.executable,
@@ -259,6 +265,8 @@ def main() -> int:
             "127.0.0.1",
             "--port",
             str(port),
+            "--workers",
+            str(args.workers),
             "--log-level",
             "warning",
         ]
@@ -266,7 +274,7 @@ def main() -> int:
 
     try:
         logger.info("Waiting for server readiness on %s/health...", base_url)
-        ready = asyncio.run(wait_for_server(base_url, timeout_seconds=15.0))
+        ready = asyncio.run(wait_for_server(base_url, timeout_seconds=30.0))
         if not ready:
             logger.error("Server on %s failed to become ready within timeout", base_url)
             return 1
