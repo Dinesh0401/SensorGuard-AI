@@ -1,185 +1,101 @@
 # SensorGuard AI
 
-**Project 03 · ML/MLOps Research Flagship · v0.5.3**
+**Project 03 · ML/MLOps Research Prototype · v0.5.3 (Milestone 6.1 Audited)**
 
-> **Investigating:** Can we preserve useful forecast calibration when public sensors fail in non-random patterns?
+> **Investigating:** Can we preserve useful forecast calibration when public environmental sensors fail in non-random patterns?
 
-[![Python CI](https://github.com/Dinesh0401/SensorGuard-AI/actions/workflows/ci.yml/badge.svg?branch=feat%2Fmilestone-3-forecasting-uncertainty)](https://github.com/Dinesh0401/SensorGuard-AI/actions/workflows/ci.yml)
+[![Python & Frontend CI](https://github.com/Dinesh0401/SensorGuard-AI/actions/workflows/ci.yml/badge.svg?branch=feat%2Fmilestone-3-forecasting-uncertainty)](https://github.com/Dinesh0401/SensorGuard-AI/actions/workflows/ci.yml)
 
-> **Status (M5.3 complete):** Research prototype evaluated on real UK AURN PM₂.₅ data (Q1 2024, 8 stations).
-> Live data ingestion is **opt-in** (requires `OPENAQ_API_KEY` and `ENABLE_LIVE_PROVIDER_FETCH=true`).
-> Do **not** interpret research results as public health advice.
+> **Status & Disclaimer:** Internal engineering research prototype evaluated on **archived Q1 2024 UK AURN PM₂.₅ data** (`2024-01-01` – `2024-03-31`, 8 stations across Greater London and regional England). Live OpenAQ polling is **disabled by default**. This repository makes **no formal unconditional MNAR coverage guarantee**, **no public health claims**, and is **not approved for public production launch**.
 
 ---
 
-## What SAGE does
+## Verified Benchmark Summary (`SG-BENCH-20261125-040900`)
 
-**SAGE** (Sensitivity-Aware Guarded Estimation) is a conformal prediction algorithm designed for air-quality forecasting under non-random sensor missingness (MNAR):
+Evaluated strictly on `2,727` valid observed test hours (`3,496` test hourly grid rows; dataset content hash `33805c42097fc86e`; nominal target `90%`):
 
-1. **Gamma-sensitivity calibration** — calibrates a prediction interval for each assumption in a user-specified MNAR sensitivity grid (Gamma ∈ {0, 0.5, 1.0, 1.5}).
-2. **Sensitivity envelope** — publishes the union of all scenario intervals, providing conservative but MNAR-robust coverage.
-3. **Disagreement signal** — computes the spread of interval widths across Gamma values as an uncertainty signal.
-4. **Guarded abstention** — withholds the forecast when disagreement exceeds a threshold (τ = 8 µg/m³), preferring abstention to publishing an unreliable interval.
+| Method (Natural Regime) | MAE | Overall PICP | Pub. PICP | Overall MPIW | Winkler | Abstention |
+|---|---:|---:|---:|---:|---:|---:|
+| Persistence + Split Conformal | **0.24** | 96.88% | 97.02% | **2.00 µg/m³** | **3.16** | 0.44% (`12`) |
+| LightGBM + CQR (Romano 2019) | 0.29 | 99.89% | 99.89% | 11.35 µg/m³ | 11.45 | 0.44% (`12`) |
+| **SAGE Full** (Sensitivity Envelope) | 0.28 | **99.93%** | **99.93%** | 17.01 µg/m³ | 17.06 | 0.44% (`12`) |
 
-**Key results** (benchmark `SG-BENCH-20261125-040900`, dataset hash `33805c42097fc86e`):
-
-| Metric | Value |
-|---|---|
-| Published coverage (natural regime) | **99.93%** |
-| Abstention rate (natural) | 0.44% |
-| Abstention rate (MNAR Gamma=1.5) | 1.09% |
-| Stale-history stratum — Persistence coverage | 66.7% |
-| Stale-history stratum — SAGE coverage | **100.0%** |
-| Automated tests | **86 passed** |
-
-**Honest trade-off:** Under calm natural conditions, Persistence + Split Conformal achieves 96.9% coverage with MPIW = 2.0 µg/m³ (vs. SAGE's 17.0 µg/m³). SAGE's advantage is specifically in high-pollution and stale-data conditions.
+**Honest Findings:**
+- Under exchangeable Q1 2024 conditions, Persistence and `LightGBM + CQR` deliver substantially sharper intervals and better Winkler scores than SAGE.
+- On 8-fold Leave-One-Station-Out CV, CQR wins on Winkler score on all 8 stations; only on held-out `station_4` (`Bexley - Slade Green`) does CQR fall below nominal (`81.72%`) while SAGE preserves `90.72%` (`MPIW 4.76`, `Winkler 13.23`).
+- In Q1 2024 testing, `D_sensitivity` equals a calibration-global constant (`3.32 µg/m³ < 8.0`), so all test abstentions (`12` natural, `26` MNAR `seed=42`, `1.09%` 3-seed ablation mean) come from the `age_hours > 12h` freshness guard; `n=12` natural stale-history samples had `0` published forecasts under both SAGE and baseline freshness policies.
 
 ---
 
-## Quick start
+## Quick Start
 
-### Python environment (research / local development)
+### Local Python & Next.js Development
 
 ```bash
 git clone https://github.com/Dinesh0401/SensorGuard-AI.git
 cd SensorGuard-AI
+git checkout feat/milestone-3-forecasting-uncertainty
+
+# Python environment (3.11+)
 python -m venv .venv
-# Windows:   .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+# Windows:     .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run all tests (86 pass)
-pytest -q
-
-# Start the API (needs DATABASE_URL in .env)
-cp .env.example .env   # then edit .env
+# Verify migrations, lint, and 86 automated tests
+ruff check . && ruff format --check .
 alembic upgrade head
+pytest tests/ -q
+
+# Start FastAPI server (SQLite archived pilot by default; set ADMIN_API_KEY in env for /api/v1/admin/*)
 uvicorn sensorguard.api:app --reload
 # API docs: http://localhost:8000/docs
+
+# Start Next.js 15 frontend (separate terminal)
+cd apps/web
+npm ci
+npm run lint && npm run typecheck && npm run dev
+# Dashboard: http://localhost:3000
 ```
 
-### Docker Compose (all services)
+### Containerized Private Staging (`docker-compose.yml`)
 
 ```bash
-cp .env.example .env   # fill in ADMIN_API_KEY and POSTGRES_PASSWORD
+cp .env.example .env   # REQUIRED: set strong POSTGRES_PASSWORD and ADMIN_API_KEY (no defaults)
 docker compose up --build
-# API:      http://localhost:8000/docs
-# Frontend: http://localhost:3000
+# PostgreSQL runs on internal Docker network only (no host port exposure)
+# FastAPI API bound to 127.0.0.1:8000 · Frontend bound to 127.0.0.1:3000
 ```
 
-### Reproduce benchmark results
+### Reproduce Benchmarks & Model Artifacts
 
 ```bash
-python scripts/run_real_benchmarks.py    # → docs/audit/benchmark_results.json
-python scripts/run_sage_ablation.py     # → docs/audit/sage_ablation_results.json
+python scripts/run_real_benchmarks.py            # → docs/audit/benchmark_results.json (+ LOSO CV & time blocks)
+python scripts/run_sage_ablations.py             # → docs/audit/sage_ablation_results.json (3 seeds × 5 conditions)
+python scripts/train_pilot_model.py              # → artifacts/models/sage_pilot_q1_2024.joblib + manifest
+python scripts/benchmark_network_concurrency.py  # → docs/audit/network_benchmark_results.json
 ```
 
 ---
 
-## Architecture
+## Project Structure & Documentation
 
-```
-┌─────────────────────────────────────────────────┐
-│  Next.js frontend (apps/web, port 3000)         │
-│  • Station map  • Forecast chart                │
-│  • Simulator Lab (live scenario selector)       │
-└──────────────────┬──────────────────────────────┘
-                   │ REST (CORS-enabled)
-┌──────────────────▼──────────────────────────────┐
-│  FastAPI backend (src/sensorguard/api.py, 8000) │
-│  • /api/v1/stations  /forecast/{id}             │
-│  • /api/v1/model/status  (SHA-256 verified)     │
-│  • /api/v1/research/experiments                 │
-└──────────┬────────────────┬───────────────────── ┘
-           │                │
-┌──────────▼───┐    ┌───────▼───────────────────── ┐
-│  PostgreSQL  │    │  SAGE model artefact          │
-│  (port 5432) │    │  artifacts/models/*.joblib    │
-└──────────────┘    │  (SHA-256: e552ca09…)         │
-                    └────────────────────────────── ┘
-```
-
----
-
-## Project structure
-
-```
-SensorGuard-AI/
-├── src/sensorguard/          # Python package
-│   ├── api.py                # FastAPI application (v0.5.3)
-│   ├── models/
-│   │   ├── sage.py           # SAGE algorithm
-│   │   └── data.py           # Feature engineering + leakage guards
-│   ├── calibration.py        # Conformal calibration
-│   ├── ablation.py           # Ablation study runner
-│   ├── evaluation.py         # Benchmark evaluator
-│   └── scheduler.py          # Background ingestion worker
-├── apps/web/                 # Next.js frontend
-├── scripts/
-│   ├── train_pilot_model.py  # Model training
-│   ├── run_real_benchmarks.py
-│   ├── run_sage_ablation.py
-│   └── smoke_test.ps1        # API smoke test
-├── tests/                    # 86 automated tests
-├── docs/
-│   ├── RESEARCH_REPORT.md    # Paper-style technical report
-│   ├── PORTFOLIO_DEMO.md     # Resume bullet + 2-min demo script
-│   ├── MODEL_ROLLBACK.md     # Model governance
-│   └── audit/                # Committed benchmark & ablation JSON
-├── artifacts/models/         # Trained model + SHA-256 manifest
-├── docker-compose.yml        # Multi-service deployment
-└── .env.example              # Environment variable reference
-```
-
----
-
-## MLOps maturity (completed milestones)
-
-| Milestone | Status |
+| Document | Purpose |
 |---|---|
-| M0: Synthetic foundation + CI | ✅ Done |
-| M1: Real data pipeline (OpenAQ) | ✅ Done |
-| M2: Six baseline forecasters | ✅ Done |
-| M3: Conformal calibration (CQR, ACI, Rolling) | ✅ Done |
-| M4: SAGE algorithm + ablation | ✅ Done |
-| M4.1: Evaluation-mask correctness audit | ✅ Done |
-| M5: FastAPI + MLflow + scheduler | ✅ Done |
-| M5.1: Disagreement signal fix + fail-closed API | ✅ Done |
-| M5.2: CORS, model SHA-256 verification | ✅ Done |
-| M5.3: Frontend lab rewrite, retrained model | ✅ Done |
-| **M6: Research report + portfolio demo** | ✅ **Done** |
+| [`docs/RESEARCH_REPORT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/RESEARCH_REPORT.md) | Paper-style research report with exact dataset balance, LOSO CV, and honest negatives |
+| [`docs/PORTFOLIO_DEMO.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/PORTFOLIO_DEMO.md) | Verified resume bullet & 2-minute walkthrough script |
+| [`docs/MILESTONE_6_1_RELEASE_AUDIT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/MILESTONE_6_1_RELEASE_AUDIT.md) | Final CI, security, scientific, and GO/NO-GO production readiness audit |
+| [`docs/EXPERIMENTS.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/EXPERIMENTS.md) | Experiment registry, exact configs, and stop-rule evaluation |
+| [`docs/PRD.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/PRD.md) · [`docs/SRS.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/SRS.md) | Product & software specifications |
+| [`docs/DATA_DICTIONARY.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/DATA_DICTIONARY.md) | Schema tables, UK AURN station metadata, and count reconciliation |
+| [`docs/NOVELTY_AUDIT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/NOVELTY_AUDIT.md) | Prior work boundaries & open comparison gaps |
+| [`docs/SECURITY.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/SECURITY.md) · [`docs/MODEL_ROLLBACK.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/MODEL_ROLLBACK.md) | Secret hygiene, auth boundaries, and SHA-256 governance |
+| [`docs/FRONTEND_API_CONTRACT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/FRONTEND_API_CONTRACT.md) | Next.js ↔ FastAPI REST contract |
 
 ---
 
-## Scientific integrity
+## Credential & Data Attribution
 
-- All benchmark numbers come directly from committed artefacts in `docs/audit/`; none are fabricated.
-- Honest negative results are reported: Persistence + SplitConformal outperforms SAGE on sharpness under calm conditions.
-- MNAR is non-identifiable from observed data; we simulate MNAR to study robustness, not to prove the data is MNAR.
-- Conformal coverage guarantees are **marginal**; conditional coverage (per station or pollution level) is not guaranteed.
-- Full limitations are documented in [RESEARCH_REPORT.md](docs/RESEARCH_REPORT.md) §10.
-
----
-
-## Documentation
-
-| Document | Description |
-|---|---|
-| [docs/RESEARCH_REPORT.md](docs/RESEARCH_REPORT.md) | Full paper-style technical report |
-| [docs/PORTFOLIO_DEMO.md](docs/PORTFOLIO_DEMO.md) | Resume bullet + 2-min demo script |
-| [docs/MODEL_ROLLBACK.md](docs/MODEL_ROLLBACK.md) | Model version governance |
-| [docs/FRONTEND_API_CONTRACT.md](docs/FRONTEND_API_CONTRACT.md) | API ↔ frontend type contract |
-| [docs/BASELINE_COMPARISON.md](docs/BASELINE_COMPARISON.md) | Baseline method comparison |
-| [docs/audit/benchmark_results.json](docs/audit/benchmark_results.json) | Full benchmark JSON |
-| [docs/audit/sage_ablation_results.json](docs/audit/sage_ablation_results.json) | Full ablation JSON |
-
----
-
-## Credential configuration
-
-Copy `.env.example` to `.env` and fill in:
-- `DATABASE_URL` — PostgreSQL connection string
-- `ADMIN_API_KEY` — required for ingest and admin endpoints
-- `OPENAQ_API_KEY` — only needed with `ENABLE_LIVE_PROVIDER_FETCH=true`
-
-Never commit `.env`. See [.env.example](.env.example) for all variables.
+- Copy `.env.example` to `.env` locally; `.env` is excluded by `.gitignore`. Never commit secrets.
+- `ADMIN_API_KEY` is required for `/api/v1/admin/*` (API fails closed with `503` if unset).
+- Attribution: © UK Defra / AURN via OpenAQ v3 under Open Government Licence v3.0.

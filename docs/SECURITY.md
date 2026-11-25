@@ -20,45 +20,45 @@
 
 | Endpoint | Protection |
 |---|---|
-| `POST /api/v1/ingest` | Requires `X-Admin-Key: {ADMIN_API_KEY}` header |
-| `POST /api/v1/admin/*` | Same as above |
-| All `GET` endpoints | Public (read-only research data) |
+| `POST /api/v1/admin/ingest` | Requires `X-Admin-Key: {ADMIN_API_KEY}` header; fails closed (`503`) if env var unset |
+| `POST /api/v1/admin/evaluate` | Same as above |
+| All `GET` endpoints | Public (read-only archived research data) |
 
-Admin key validation: constant-time comparison via `hmac.compare_digest` to prevent timing attacks.
+Admin key validation uses constant-time `secrets.compare_digest` in `src/sensorguard/api.py` (`verify_admin_key`).
 
 ---
 
 ## 3. Input Validation
 
-- All request bodies validated via Pydantic v2 schemas with explicit field constraints
-- Station ID and sensor ID path parameters validated as integers
-- Date range parameters validated: `from_date < to_date`, max window 90 days
-- No arbitrary query execution; all DB access via SQLAlchemy ORM with parameterised queries
+- All request bodies validated via Pydantic v2 schemas (`src/sensorguard/schemas.py`) with explicit bounds (`AdminIngestRequest.days` bounded `1..90`, `AdminEvaluateRequest.nominal_coverage` bounded `0.50..0.99`)
+- Station IDs typed as integers (`404` if absent) and `bbox` coordinates strictly validated (`-180 <= min_lon < max_lon <= 180`, `-90 <= min_lat < max_lat <= 90`)
+- Pagination limits clamped (`observations`: `1..1000`, `forecasts`: `1..168`)
+- All DB access via SQLAlchemy 2.0 ORM parameterised queries
 
 ---
 
 ## 4. Data Provenance and Integrity
 
 - Raw API responses stored with SHA-256 hash (`raw_ingest_batches.response_hash`)
-- Model artefact verified against `EXPECTED_MODEL_SHA256` on API startup; HTTP 503 if mismatch
+- Model artefact verified via constant-time SHA-256 check against `manifest.json` (`verify_model_sha256` / `manifest.verify_file`); HTTP `503` if missing or invalid
 - Dataset split hash (`33805c42097fc86e`) committed alongside benchmark results for reproducibility audit
-- Append-only observation store; no historical record deletion
+- Append-only versioned observation storage via `(sensor_id, observed_at, version)`
 
 ---
 
-## 5. Network Security
+## 5. Network Security & Container Hardening
 
-- CORS origins explicitly configured via `CORS_ORIGINS` environment variable
-- Default CORS allows only `http://localhost:3000` and `http://127.0.0.1:3000`
-- For production: set `CORS_ORIGINS` to only the actual frontend origin
-- TLS/HTTPS required for any public deployment (not enforced locally)
+- CORS origins explicitly configured via `CORS_ORIGINS` (`http://localhost:3000,http://127.0.0.1:3000` by default)
+- In `docker-compose.yml`: PostgreSQL has **no host port exposure** (internal network only), requires non-default `POSTGRES_PASSWORD` and `ADMIN_API_KEY`, and binds FastAPI/frontend ports strictly to loopback `127.0.0.1`
+- TLS/HTTPS termination via reverse proxy is required before any public exposure
 
 ---
 
 ## 6. Rate Limiting
 
 - OpenAQ API: token-bucket rate limiter in `providers.py` (`RateLimiter`)
-- FastAPI: no built-in rate limiting currently; production deployments should add middleware or a reverse proxy (nginx/Caddy) with rate limiting
+- FastAPI admin endpoints: built-in in-memory sliding-window rate limiter (`30` requests/min returning `HTTP 429`) and `asyncio.Lock()` concurrency mutex
+- Public `GET` endpoints: deploy behind reverse proxy (`nginx`/`Caddy`) rate limiting in production
 
 ---
 

@@ -1,89 +1,40 @@
 # SensorGuard AI — Novelty Audit
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Date:** 2026-11-25  
-**Status:** Research prototype — originality NOT independently peer-reviewed
+**Status:** Internal research prototype audit — originality **not** peer-reviewed or established
 
 ---
 
-## Purpose
+## 1. Prior Work Comparison
 
-This document records a structured audit of related prior work to assess the originality of the SAGE (Sensitivity-Aware Guarded Estimation) approach and to identify where SAGE's contribution is genuinely novel versus where it recombines existing ideas.
-
-> [!WARNING]
-> This is a self-audit. It does not constitute peer review. Claims should be independently verified before any research submission.
-
----
-
-## 1. Prior Work Survey
-
-### 1.1 Conformal prediction foundations
-
-| Reference | Key Contribution | Relation to SAGE |
+| Reference | Contribution | Relation & Boundary vs. SensorGuard |
 |---|---|---|
-| Venn & Shafer (2005), *A Tutorial on Conformal Prediction* | Finite-sample marginal coverage guarantee | SAGE builds on split conformal calibration |
-| Romano, Patterson & Candès (2019), *Conformalized Quantile Regression* | CQR extends conformal to quantile regression models | SAGE implements CQR as the `no_sensitivity_grid` baseline |
-| Gibbs & Candès (2021), *Adaptive Conformal Inference Under Distribution Shift* | ACI adapts coverage online | SAGE implements ACI as a baseline; ACI does not address MNAR |
-| Zaffran et al. (2022/2023), *Conformal Prediction with Missing Values* (ICML 2023) | Conformal prediction when features are missing | Addresses missing **features** (imputation uncertainty); SAGE addresses missing **labels** (MNAR calibration bias) |
-
-### 1.2 Sensitivity analysis and partial identification
-
-| Reference | Key Contribution | Relation to SAGE |
-|---|---|---|
-| Rosenbaum (2002), *Observational Studies* | Gamma-sensitivity model for odds-ratio bounds | SAGE's MNAR model directly uses this parameterisation |
-| Manski (2003), *Partial Identification of Probability Distributions* | Bounds without full identification | SAGE takes a similar bounding approach via the sensitivity envelope |
-| Cornfield et al. (1959) | Original sensitivity analysis for confounding | Historical basis for Gamma model |
-
-### 1.3 Air-quality and sensor-network forecasting
-
-| Reference | Relation to SAGE |
-|---|---|
-| *Citywide Air Quality Forecasting over Sparse Sensor Networks* (MDPI 2026) | Spatial imputation; does not address conformal calibration or MNAR |
-| *OmniST: Topology-Invariant Spatiotemporal Forecasting* (arXiv 2026) | Deep learning for sparse sensors; no conformal or MNAR handling |
-| *SA-IDS: Informative Sensor Silence* (SSRN 2026) | Addresses informative silence in industrial sensors; different domain and method |
-| *Adaptive Conformal Prediction for Time Series with Missing Values* (TMLR 2026) | Closest related work — must compare directly before any publication |
-| *Evolving trends in low-cost air quality sensor networks* (Nature 2025) | Survey; motivates the problem setting |
+| Vovk, Gammerman & Shafer (2005), *Algorithmic Learning in a Random World* | Finite-sample marginal conformal intervals | Standard exchangeability foundation |
+| Romano, Patterson & Candès (2019), *Conformalized Quantile Regression (CQR)* | Quantile regression + conformal residual adjustment | Implemented baseline (`lightgbm_quantile`); sharper than SAGE on Q1 2024 calm & natural strata and wins Winkler score on all 8 LOSO folds |
+| Gibbs & Candès (2021), *Adaptive Conformal Inference (ACI)* | Online $\alpha_t$ step updates under shift | Implemented baseline (`lightgbm_aci`); exhibits severe width explosion (`MPIW = 141.46`) on this dataset |
+| Zaffran et al. (2023, ICML), *Conformal Prediction with Missing Values* | Missing covariates $X$ during prediction | Targets missing features rather than MNAR calibration labels; distinct assumption set |
+| Rosenbaum (2002), *Observational Studies* | Pairwise selection odds-ratio bound $\Gamma \ge 1$ | **Important distinction:** SAGE uses a parametric logit slope `g(X) + gamma*(Y - mu)/sigma` plus heuristic residual-std shifts `gamma * sigma_res / 2`, which is *not* mathematically equivalent to Rosenbaum's non-parametric $\Gamma$ sensitivity theorem |
+| Manski (2003), *Partial Identification of Probability Distributions* | Assumption-explicit interval bounds | Conceptual motivation; SAGE's bounds are heuristic sensitivity envelopes rather than sharp identification regions |
+| *Adaptive Conformal Prediction for Time Series with Missing Values* (TMLR 2026) | Closest time-series missingness conformal work | Not yet implemented and compared — open pre-publication blocker |
 
 ---
 
-## 2. What SAGE Does (Claimed Contribution)
+## 2. Verified Contribution Scope (What Is Demonstrated vs. Not Demonstrated)
 
-SAGE integrates:
-1. **A Gamma-sensitivity grid** over the MNAR calibration step (not just over inference)
-2. **A scenario-disagreement signal** as the spread of calibrated interval widths
-3. **A guarded abstention policy** triggered by disagreement (not by interval width alone)
+### Demonstrated
+- End-to-end leak-free evaluation harness preserving evaluator-only ground truth while causally reconstructing lags, rolling statistics, spatial IDW neighbors, and sensor age.
+- Transparent, reproducible baseline suite fixing earlier evaluation-denominator bugs and request-path retraining defects.
+- Empirically separating upper-bound sensitivity spread ($D_{\text{sensitivity}}$) from total envelope width ($W_{\text{envelope}}$) so freshness gating does not collapse into 100% abstention.
 
-This combination — MNAR-sensitivity analysis embedded in conformal calibration with abstention — has not been found in a directly equivalent published form in the literature surveyed above.
-
----
-
-## 3. What SAGE Does NOT Claim
-
-| Non-claim | Reason |
-|---|---|
-| Distribution-free MNAR coverage | MNAR is non-identifiable without assumptions; we work within a specified Gamma model |
-| Superiority over CQR on sharpness | CQR achieves 99.9% coverage with MPIW = 11.4 µg/m³ vs. SAGE's 17.0 µg/m³ |
-| Generalisation beyond UK AURN Q1 2024 | Not tested on held-out stations or time periods |
-| Superiority over ACP-TSM baseline | This baseline (Adaptive Conformal with Missing Values, TMLR 2026) has not been fully implemented and compared |
-| Peer-reviewed novelty | This is a research prototype, not a published result |
+### Not Demonstrated / Explicitly Disclaimed
+- **No formal finite-sample MNAR coverage theorem** under general missingness or Rosenbaum odds-ratio bounds.
+- **No matched-width superiority over CQR or Persistence:** Under calm Q1 2024 conditions and MNAR $\gamma = 1.5$ tests (`SG-BENCH-20261125-040900`), `LightGBM + CQR` achieves `99.78%`–`99.89%` coverage with ~33% narrower intervals and better Winkler scores.
+- **No delivered stale-history gain proven:** The $n=12$ natural (`n=26` MNAR) `age > 12h` subgroup was `100%` abstained (`0` published) under both SAGE and the shared baseline freshness policy.
+- **Local disagreement invariance limitation:** Current `D_sensitivity` is globally constant (`3.32 µg/m³ < 8.0`) because sensitivity shifts depend only on calibration variance rather than input covariates $X$.
 
 ---
 
-## 4. Gap Identification
+## 3. Conclusion
 
-The most important unresolved comparison:
-
-> **Zaffran et al. ICML 2023** addresses conformal prediction with missing **features** (covariates). SAGE addresses missing **labels** (ground truth at calibration time). These are different problems and the methods are not directly comparable, but this distinction must be clearly stated in any submission.
-
-> **TMLR 2026 (Adaptive Conformal for Time Series with Missing Values)**: this paper may address a very similar problem to SAGE. Full bibliographic details and a direct empirical comparison are needed before any publication-level novelty claim.
-
----
-
-## 5. Recommendation
-
-SAGE is a credible research prototype with a coherent engineering design and an honest evaluation. It should **not** be described as a peer-reviewed publication or as proven to be novel without:
-1. A complete literature search with keyword coverage
-2. A direct empirical comparison to Zaffran et al. and the TMLR 2026 paper
-3. External validation on at least one additional dataset/region
-
-For portfolio and educational purposes, SAGE is well-evidenced. For research submission, the novelty claim requires further validation.
+SensorGuard AI is well-founded as an engineering research and portfolio platform that enforces strict no-leakage hygiene and honest negative reporting, but it must not claim formal theoretical novelty or competitive superiority over CQR until TMLR 2026 comparisons, localized disagreement scaling, and multi-region out-of-sample tests are completed.

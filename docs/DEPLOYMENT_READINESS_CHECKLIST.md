@@ -11,7 +11,7 @@
 
 > [!CAUTION]
 > **PUBLIC PRODUCTION LAUNCH IS NOT APPROVED.**
-> In accordance with research validation directives, SensorGuard AI is currently approved **strictly for Private Staging Evaluation** on the archived Q1 2024 London AURN pilot dataset. Public deployment, commercial release, live streaming ingestion, or external claims of universal superiority over conventional conformal prediction are prohibited until multi-city validation is completed.
+> In accordance with research validation directives, SensorGuard AI is approved **strictly for Private Staging Evaluation** on the archived Q1 2024 8-station UK AURN pilot dataset (`2024-01-01` – `2024-03-31`). Public deployment, commercial release, live streaming ingestion, or external claims of superiority over conventional conformal prediction (CQR) are prohibited.
 
 | Release Gate | Required Condition | Staging Status | Production Status | Owner / Authority |
 | :--- | :--- | :---: | :---: | :--- |
@@ -37,10 +37,9 @@
 
 ### 2.2 Model Artifact Verification
 - [x] Model artifact stored at `artifacts/models/sage_pilot_q1_2024.joblib`.
-- [x] Cryptographic SHA-256 checksum recorded in `artifacts/models/sage_pilot_q1_2024.sha256`:
-  `6155ee41544f4a53b24c4528bbc55afa3f7e3b02aa511f61d65605ff40eab77b`
-- [x] `verify_model_sha256()` validates hash integrity using constant-time `secrets.compare_digest()`.
-- [x] Deserialization of unverified or tampered artifacts is strictly rejected with a `SECURITY_ALERT`.
+- [x] Cryptographic SHA-256 checksum recorded in `artifacts/models/sage_pilot_q1_2024.sha256` and `manifest.json`:
+  `e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115`
+- [x] `verify_model_sha256()` / `manifest.verify_file()` validates hash integrity using constant-time digest comparison; serving fails closed with HTTP `503`.
 
 ### 2.3 Transparent Baseline Claims
 - [x] SAGE is NOT claimed as universally superior to conventional conformal prediction.
@@ -122,12 +121,11 @@ To migrate from Private Staging to PostgreSQL Production when release approval i
 
 ## 6. Frontend Staging Web App (`apps/web`)
 
-- [x] Built with Next.js 14 (App Router), React 18, TypeScript, and Tailwind CSS.
-- [x] Zero external build dependencies required; static output compilation (`next build`) passes cleanly.
-- [x] Persistent warning banner states: `Strict Pilot Mode: Archived Q1 2024 UK AURN London Network`.
-- [x] Real London station coordinates mapped onto an interactive SVG interface.
+- [x] Built with Next.js 15.5.29 (App Router static export), React 18, TypeScript, and Tailwind CSS (`npm audit` 0 vulnerabilities; ESLint + `tsc --noEmit` + `next build` pass).
+- [x] Persistent warning banner states: `Strict Pilot Mode: Archived Q1 2024 UK AURN Network`.
+- [x] Actual 8 UK AURN pilot coordinates (Greater London, Southampton, Wicken Fen, St Osyth, Manchester) mapped onto an interactive SVG projection.
 - [x] Live visualization of SAGE point forecasts, conservative sensitivity envelopes, and safety status badges (`PUBLISH`, `CAUTION`, `ABSTAIN`).
-- [x] Full baseline comparison table displaying empirical results from `docs/audit/benchmark_results.json`.
+- [x] Live Simulator Lab querying `/api/v1/research/experiments/{id}` cleanly without mock substitution in live mode.
 
 ---
 

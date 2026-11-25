@@ -1,6 +1,6 @@
 """Offline training script for SensorGuard AI SAGE pilot forecaster.
 
-Trains the SAGE model offline on Q1 2024 London AURN pilot observations,
+Trains the SAGE model offline on Q1 2024 UK AURN pilot observations (8 stations),
 computes its SHA-256 cryptographic digest, saves artifacts/models/sage_pilot_q1_2024.joblib,
 and writes artifacts/models/manifest.json.
 

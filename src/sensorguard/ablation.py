@@ -482,7 +482,7 @@ def generate_ablation_markdown(summary: dict[str, Any]) -> str:
         f"**Dataset Lineage Hash:** `{summary['dataset_hash']}`  ",
         f"**Random Seeds:** `{summary['seeds']}` (3 runs per cell)  ",
         f"**Nominal Coverage Target:** `{summary['nominal_coverage']:.0%}`  ",
-        "**Evaluation Window:** Q1 2024 UK AURN Pilot Network (London Urban Ingestion)  ",
+        "**Evaluation Window:** Q1 2024 UK AURN Pilot Network (8 Stations across Greater London & regional England)  ",
         "",
         "---",
         "",

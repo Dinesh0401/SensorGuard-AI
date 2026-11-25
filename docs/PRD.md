@@ -89,25 +89,22 @@ A system that simply uses whatever data arrives will systematically undercover t
 
 | Criterion | Status |
 |---|---|
-| ≥ 8 active UK AURN stations in database | ✅ 8 stations |
-| All 6 baselines + SAGE implemented and benchmarked | ✅ Committed in `docs/audit/` |
+| 8 UK AURN stations in database (`Q1 2024`) | ✅ 8 stations (`14,556` valid readings) |
+| All 6 baselines + SAGE + 8-fold LOSO CV benchmarked | ✅ Committed in `docs/audit/benchmark_results.json` |
 | MCAR / MAR / MNAR / burst outage scenarios | ✅ `src/sensorguard/ablation.py` |
-| ≥ 3 ablation seeds, negative results reported | ✅ 3 seeds, honest negatives in RESEARCH_REPORT.md |
-| Automated test suite with ≥ 80% coverage target | ✅ 86 tests pass |
-| CI pipeline green | ✅ GitHub Actions |
-| Docker Compose deployment | ✅ `docker-compose.yml` |
-| Research report with limitations | ✅ `docs/RESEARCH_REPORT.md` |
-| Portfolio demo | ✅ `docs/PORTFOLIO_DEMO.md` |
-| No fabricated numbers | ✅ All numbers from committed audit JSON |
-| Model SHA-256 verified API | ✅ `src/sensorguard/api.py` |
+| 3 ablation seeds, negative results documented | ✅ 3 seeds, honest negatives in `RESEARCH_REPORT.md` |
+| Automated unit, contract, migration & no-leakage tests | ✅ 86 tests pass (no-leakage, API, DB, SAGE) |
+| Python + Next.js CI pipeline green | ✅ Ruff, Alembic, pytest, npm audit (0 vulns), ESLint, tsc, build |
+| Containerized staging config (`docker-compose.yml`) | ✅ PostgreSQL internal network, loopback ports, no default passwords |
+| Research report & portfolio demo | ✅ `docs/RESEARCH_REPORT.md`, `docs/PORTFOLIO_DEMO.md` |
+| Honest evidence & SHA-256 fail-closed API | ✅ Audited against JSON artifacts |
 
 ---
 
 ## 8. Known Limitations and Open Items
 
-1. Leave-one-station-out cross-validation not completed — spatial generalisability is not validated
-2. Only Q1 2024 (one quarter) — temporal generalisability is not validated
-3. SAGE interval widths are substantially wider than simpler baselines under calm conditions
-4. Abstention threshold τ = 8 µg/m³ was not held out as a hyper-parameter
-5. Frontend live API connection is opt-in; demo mode uses committed mock data
-6. Public live deployment not approved (requires production infra review)
+1. 8-fold Leave-One-Station-Out CV is evaluated only on the UK AURN Q1 2024 network (natural regime); out-of-region multi-city and multi-season generalisability remain unvalidated
+2. SAGE interval widths are substantially wider (`17.01 µg/m³`) than Persistence (`2.00 µg/m³`) and LightGBM + CQR (`11.35 µg/m³`), and CQR achieves lower Winkler scores on all 8 LOSO stations
+3. Current global calibration sensitivity spread `D_sensitivity = 3.32 µg/m³ < 8.0` is invariant across test inputs, so observed abstentions (`12` natural, `26` MNAR seed 42) trigger via sensor staleness (`age_hours > 12h`) rather than per-sample local disagreement
+4. Comparison to `TMLR 2026` (*Adaptive Conformal Prediction for Time Series with Missing Values*) is incomplete
+5. Public live deployment is **not approved** (requires PostgreSQL load verification, reverse-proxy rate limiting, and sustained live ingestion checks)

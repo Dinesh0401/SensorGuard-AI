@@ -1,95 +1,42 @@
-# SensorGuard AI — Portfolio Demo
+# SensorGuard AI — Portfolio Demo & Walkthrough
 
 ## Resume Bullet
 
-> **SensorGuard AI** — Built a full-stack air-quality forecasting system (FastAPI · Next.js · PostgreSQL) featuring SAGE, a novel conformal prediction algorithm that handles non-random sensor missingness via a Gamma-sensitivity model and guarded abstention policy, achieving 99.9% published coverage on 8 UK AURN stations with sub-0.5% abstention under natural conditions.
+> **SensorGuard AI** — Engineered a full-stack air-quality forecasting and uncertainty-evaluation platform (FastAPI · Next.js 15 · PostgreSQL/SQLite · MLflow) across 8 UK AURN stations (Q1 2024, 14,556 hourly PM₂.₅ observations), implementing point-in-time feature replay, six conformal baselines (Split, CQR, Rolling, ACI), SAGE parametric logit sensitivity enveloping with staleness abstention, SHA-256 fail-closed model serving, and CI/CD (86 Python tests + Next.js lint/typecheck/build).
 
 ---
 
 ## 2-Minute Demo Script
 
-### Slide / screen sequence and talking points
+### [0:00–0:20] Hook — The Evaluation Problem
+**Show:** Map view of all **8 UK AURN pilot stations** (spanning Greater London, Southampton, Wicken Fen, St Osyth, and Manchester Piccadilly — clearly labeled *Archived Q1 2024 UK AURN Network*).
+
+> "Environmental sensors fail non-randomly. If you evaluate forecasters only on intact readings, you miss periods when history goes stale or drops out during pollution episodes. SensorGuard AI separates real historical measurements from causal simulated outages and exposes uncertainty intervals honestly."
+
+### [0:20–0:50] Engineering & Provenance Architecture
+**Show:** Station detail view + Footer model badge (`SHA-256 Verified`) + Architecture diagram.
+
+> "Every observation separates physical `observed_at`, upstream `received_at`, and `fetched_at` timestamps to block future lookahead. Behind a Next.js 15 static UI sits a CORS-configured FastAPI service with fail-closed SHA-256 model verification, constant-time admin auth, PostgreSQL pooling config, and Alembic schema migrations."
+
+### [0:50–1:25] Simulator Lab & Sensitivity Analysis
+**Show:** Simulator Lab tab → toggle `natural` → `mnar_gamma_1.5` → `burst_24h`.
+
+> "SAGE fits a covariate propensity model `P(R=1|X)` and sweeps a parametric logit sensitivity grid across `γ ∈ {0, 0.5, 1, 1.5, 2}`, taking the union envelope and checking staleness (`>12h`), effective sample size, and inter-scenario spread. In MNAR simulations (`γ = 1.5`), SAGE retains `99.96%` published coverage with `0.95%` single-seed (`1.09%` 3-seed) freshness abstention."
+
+### [1:25–2:00] Honest Scientific Benchmarking & Negative Results
+**Show:** Benchmark comparison table + LOSO discussion in [`docs/RESEARCH_REPORT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/RESEARCH_REPORT.md).
+
+> "Just as important are the honest negative results documented in our benchmark: in calm conditions, Persistence + Split Conformal gets `96.9%` coverage at `2.0 µg/m³` width (`Winkler 3.16`), and LightGBM + CQR achieves `99.9%` coverage at `11.35 µg/m³` (`Winkler 11.45`) — outperforming SAGE's conservative `17.01 µg/m³` width (`Winkler 17.06`). SAGE only improves coverage over CQR on the anomalous held-out Station 4 LOSO fold (`90.7%` vs `81.7%`), still at higher Winkler loss (`13.23` vs `11.46`). All 86 tests, npm audit (`0` vulns), ESLint, TypeScript, and Next.js build pass in CI."
 
 ---
 
-### [0:00–0:20] Hook — the problem
+## Verified Key Figures (Never Exaggerated)
 
-**Show:** Live dashboard map of 8 UK stations (London to Manchester)
-
-> "Air-quality sensors fail silently — and they fail *more* during pollution events, the exact times we most need data. Standard forecasting methods assume missingness is random. It isn't. SensorGuard AI is my solution."
-
----
-
-### [0:20–0:50] Architecture overview
-
-**Show:** README architecture diagram or the Docker Compose diagram
-
-> "The system has four layers:
-> 1. A PostgreSQL database storing real AURN measurements  
-> 2. A FastAPI backend that serves predictions via a REST API  
-> 3. A Next.js frontend with a live simulator lab  
-> 4. A SAGE model — Sensitivity-Aware Guarded Estimation — that I designed to be robust to non-random data gaps."
-
----
-
-### [0:50–1:20] The algorithm — live in the UI
-
-**Show:** Simulator Lab tab → Scenario selector: switch from `natural` → `mnar_gamma_1.5`
-
-> "Here's what makes SAGE different. I calibrate prediction intervals under four different assumptions about *how bad* the missingness is — Gamma values from 0 (random) to 1.5 (strongly non-random). The *disagreement* between those four scenarios is my uncertainty signal.
-
-> When I switch to the MNAR Gamma=1.5 scenario — simulating sensor failures correlated with high pollution — watch the abstention rate climb from 0.4% to 1.1%, and published coverage holds above 99.9%. SAGE selectively withholds predictions when the data-gap mechanism would make them unreliable."
-
----
-
-### [1:20–1:40] Honest evaluation — the benchmark table
-
-**Show:** Research tab → Benchmark comparison table
-
-> "And here's the honest part. Under normal conditions, a simple Persistence baseline — just copying yesterday's reading — achieves 97% coverage with intervals only 2 µg/m³ wide. SAGE gets 99.9% coverage but with 17 µg/m³ intervals.
-
-> I could have buried that number. Instead it's in the report and in the UI. SAGE's value is *specifically* in high-pollution, stale-data conditions — where the stale-history stratum shows 67% coverage for Persistence vs 100% for SAGE."
-
----
-
-### [1:40–2:00] Engineering highlights + call to action
-
-**Show:** GitHub Actions CI badge → `86 passed` · model status badge showing SHA-256 verification
-
-> "86 automated tests, green CI, model artefact SHA-256 verification, CORS-enabled API, Docker Compose deployment, and an MLflow experiment registry. The full research report with reproducibility instructions is in the repo.
-
-> If you work on environmental monitoring, sensor reliability, or uncertainty quantification — I'd love to talk."
-
----
-
-## Key Numbers to Know
-
-| Metric | Value |
-|---|---|
-| Test observations | 2,727 (of 3,496 total) |
-| SAGE published coverage (natural) | 99.93% |
-| SAGE abstention rate (natural) | 0.44% |
-| SAGE abstention rate (MNAR Gamma=1.5) | 1.09% |
-| Persistence MPIW | 2.00 µg/m³ |
-| SAGE MPIW | 17.00 µg/m³ |
-| Stale-history coverage — Persistence | 66.67% |
-| Stale-history coverage — SAGE | 100.00% |
-| Automated tests | 86 passed |
-| Stations | 8 UK AURN |
-| Dataset period | Q1 2024 |
-
----
-
-## Potential Interview Questions & Suggested Answers
-
-**Q: Why not just use a wider split-conformal interval?**  
-A: You could inflate a split-conformal interval to match SAGE's coverage, but then you lose the semantic meaning: a wider interval from SAGE specifically reflects disagreement across MNAR assumptions, which is actionable information. The abstention policy surfaces that signal without inflating every interval.
-
-**Q: What is the Gamma-sensitivity model?**  
-A: It's a classic partial-identification model (Rosenbaum 2002) that bounds how much the missing-data odds ratio can deviate from 1. Gamma=1 is MAR. Gamma=1.5 means a sample can be 1.5× more likely to be missing because of its own value than because of observed covariates.
-
-**Q: Why does coverage exceed the 90% nominal?**  
-A: The sensitivity envelope uses the worst-case quantile across all Gamma values. This is a conservative construction — it over-covers. That's the right trade-off for public health applications where under-coverage is dangerous.
-
-**Q: How would you deploy this in production?**  
-A: The Docker Compose file and MODEL_ROLLBACK.md document the full path. The API validates the model SHA-256 on startup and fails closed if the artefact is missing or corrupted — no silent fall-back to on-demand training. The scheduler worker handles incremental data ingestion on a cron schedule.
+| Fact | Verified Value | Caveat / Context |
+|---|---|---|
+| Geography & Dates | 8 UK AURN stations, `2024-01-01` – `2024-03-31` | Greater London (4), Southampton, Wicken Fen, St Osyth, Manchester |
+| Raw valid DB observations | `14,556` (`8,884` train + `2,937` cal + `2,727` test reported + `8` warmup) | `3,496` test grid rows = `2,727` valid + `769` missing |
+| Natural benchmark (`SG-BENCH-20261125-040900`) | Persistence `96.88%` (`MPIW 2.00`), CQR `99.89%` (`MPIW 11.35`), SAGE `99.93%` (`MPIW 17.01`) | SAGE over-covers via conservative bounds; CQR & Persistence win on sharpness |
+| Active Q1 2024 abstentions | `12 / 2,727` (`0.44%`) natural; `26 / 2,727` (`0.95%`) MNAR seed 42 (`1.09%` 3-seed) | Driven by `age_hours > 12h` freshness guard (`D_sens = 3.32 < 8.0`); stale-history `n=12` natural had `0` published forecasts |
+| 8-fold LOSO CV (`natural`) | CQR wins Winkler on 8/8 stations; `station_4` coverage: SAGE `90.72%` vs CQR `81.72%` | No formal MNAR finite-sample guarantee claimed |
+| Test & Security checks | `86 passed` pytest, `0` npm audit vulnerabilities | Private staging prototype — not deployed to public production |

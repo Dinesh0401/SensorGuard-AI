@@ -1,7 +1,7 @@
 # SensorGuard AI — Frontend & API Contract Specification
 **Milestone 5.3 Verified Next.js 15 to FastAPI REST Interface**
 
-- **Frontend Package:** `apps/web` (Next.js 15.3.9, React 18.3, TypeScript, Tailwind CSS)
+- **Frontend Package:** `apps/web` (Next.js 15.5.29, React 18.3, TypeScript, Tailwind CSS)
 - **API Client:** [apps/web/lib/api.ts](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/apps/web/lib/api.ts)
 - **Backend Service:** [src/sensorguard/api.py](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/src/sensorguard/api.py) & [src/sensorguard/schemas.py](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/src/sensorguard/schemas.py)
 - **Base URL:** `http://localhost:8000` (configurable via `NEXT_PUBLIC_API_URL`)
