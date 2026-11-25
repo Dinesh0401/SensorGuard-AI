@@ -226,6 +226,13 @@ def main() -> int:
         help="Requests per concurrency tier (default 100)",
     )
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        nargs="+",
+        default=CONCURRENCY_LEVELS,
+        help="List of concurrency levels to test (default: 1 5 10 20)",
+    )
+    parser.add_argument(
         "--output-json",
         type=Path,
         default=Path("docs/audit/network_benchmark_results.json"),
@@ -268,7 +275,7 @@ def main() -> int:
         results = asyncio.run(
             benchmark_all_endpoints(
                 base_url=base_url,
-                concurrency_levels=CONCURRENCY_LEVELS,
+                concurrency_levels=args.concurrency,
                 requests_per_tier=args.requests,
             )
         )
