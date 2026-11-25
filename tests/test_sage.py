@@ -106,7 +106,11 @@ def test_sage_fit_and_predict(synthetic_sensor_data):
     assert len(res.reason) == len(X_test)
     assert res.effective_sample_size > 0.0
     assert set(res.status).issubset({"publish", "caution", "abstain"})
-    np.testing.assert_allclose(res.scenario_disagreement, res.upper_envelope - res.lower_envelope)
+    scenarios = forecaster_lgb.predict_all_scenarios(X_test)
+    uppers = [u_arr for _, u_arr in scenarios.values()]
+    np.testing.assert_allclose(res.scenario_disagreement, np.max(uppers, axis=0) - np.min(uppers, axis=0))
+    np.testing.assert_allclose(res.width, res.upper_envelope - res.lower_envelope)
+    np.testing.assert_allclose(res.envelope_width, res.upper_envelope - res.lower_envelope)
 
     # 2. Test with Ridge base model
     forecaster_ridge = SAGEForecaster(config=SAGEConfig(base_model_type="ridge"))
@@ -251,6 +255,19 @@ def test_guarded_abstention_rules():
     )
     assert status == "publish"
     assert "sufficient_evidence" in reason
+
+    # 7. Envelope width exceeds threshold (> 50.0)
+    status, reason = guarded_decision_rule(
+        scenario_disagreement=4.0,
+        effective_sample_size=25.0,
+        age_hours=0.5,
+        max_disagreement_threshold=8.0,
+        min_effective_sample_size=15,
+        envelope_width=55.0,
+        max_envelope_width_threshold=50.0,
+    )
+    assert status == "abstain"
+    assert "envelope_width" in reason
 
 
 def test_guarded_decision_vectorized():

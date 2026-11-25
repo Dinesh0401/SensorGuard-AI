@@ -6,7 +6,8 @@ Implements the SAGE framework for environmental sensor networks under nonrandom 
 - Sensitivity reweighting and bound shifts across an analyst-imposed gamma grid:
     logit P(R=1 | X, Y) = g(X) + gamma * (Y - mu) / sigma
 - Conservative interval envelope [L_envelope, U_envelope] = [min_gamma L_gamma, max_gamma U_gamma]
-- Scenario disagreement metric: max_gamma U_gamma - min_gamma L_gamma
+- Scenario disagreement metric: max_gamma U_gamma - min_gamma U_gamma (spread across sensitivity scenarios)
+- Envelope width: upper_envelope - lower_envelope
 - Guarded safety policy abstaining under severe outage, excessive disagreement, or stale data
 """
 
@@ -37,12 +38,13 @@ class SAGEConfig:
     Attributes:
         gamma_grid: Hypothesized MNAR sensitivity values.
         nominal_coverage: Target prediction interval coverage level (1 - alpha).
-        max_disagreement_threshold: Max scenario disagreement (envelope width) before abstention.
+        max_disagreement_threshold: Max scenario disagreement (spread across sensitivity scenarios) before abstention.
         min_effective_sample_size: Minimum Kish effective sample size required to publish.
         base_model_type: Forecaster architecture ('lightgbm' or 'ridge').
         stale_age_hours: Sensor history age (hours) beyond which forecast must abstain.
         caution_age_hours: Sensor history age (hours) triggering caution status.
         caution_disagreement_ratio: Fraction of max disagreement threshold triggering caution.
+        max_envelope_width_threshold: Max interval envelope width before abstention.
     """
 
     gamma_grid: tuple[float, ...] = (0.0, 0.5, 1.0, 1.5, 2.0)
@@ -53,6 +55,7 @@ class SAGEConfig:
     stale_age_hours: float = 12.0
     caution_age_hours: float = 3.0
     caution_disagreement_ratio: float = 0.70
+    max_envelope_width_threshold: float = 50.0
 
 
 @dataclass
@@ -67,11 +70,16 @@ class SAGEResult:
     reason: np.ndarray
     effective_sample_size: float
     gamma_intervals: dict[float, tuple[np.ndarray, np.ndarray]]
+    envelope_width: np.ndarray | None = None
+
+    def __post_init__(self) -> None:
+        if self.envelope_width is None:
+            self.envelope_width = np.maximum(0.0, self.upper_envelope - self.lower_envelope)
 
     @property
     def width(self) -> np.ndarray:
         """Width of the conservative prediction interval envelope."""
-        return np.maximum(0.0, self.upper_envelope - self.lower_envelope)
+        return self.envelope_width if self.envelope_width is not None else np.maximum(0.0, self.upper_envelope - self.lower_envelope)
 
     @property
     def is_published(self) -> np.ndarray:
@@ -88,28 +96,43 @@ def guarded_decision_rule(
     stale_age_hours: float = 12.0,
     caution_age_hours: float = 3.0,
     caution_disagreement_ratio: float = 0.70,
+    envelope_width: np.ndarray | float | None = None,
+    max_envelope_width_threshold: float = 50.0,
 ) -> tuple[Any, Any]:
     """Guarded decision policy evaluating disagreement, effective sample size, and freshness.
 
     Returns:
         tuple (status, reason) where status is in {'publish', 'caution', 'abstain'}.
     """
-    is_scalar = np.isscalar(scenario_disagreement) and np.isscalar(age_hours)
+    is_scalar = (
+        np.isscalar(scenario_disagreement)
+        and np.isscalar(age_hours)
+        and (envelope_width is None or np.isscalar(envelope_width))
+    )
     disag = np.atleast_1d(np.asarray(scenario_disagreement, dtype=float))
     ages = np.atleast_1d(np.asarray(age_hours, dtype=float))
 
-    if len(disag) != len(ages) and len(ages) == 1:
-        ages = np.full_like(disag, ages[0])
-    elif len(disag) != len(ages) and len(disag) == 1:
-        disag = np.full_like(ages, disag[0])
+    n = max(len(disag), len(ages))
+    if envelope_width is not None:
+        widths = np.atleast_1d(np.asarray(envelope_width, dtype=float))
+        n = max(n, len(widths))
+    else:
+        widths = None
 
-    n = len(disag)
+    if len(disag) != n and len(disag) == 1:
+        disag = np.full(n, disag[0])
+    if len(ages) != n and len(ages) == 1:
+        ages = np.full(n, ages[0])
+    if widths is not None and len(widths) != n and len(widths) == 1:
+        widths = np.full(n, widths[0])
+
     statuses = np.empty(n, dtype=object)
     reasons = np.empty(n, dtype=object)
 
     for i in range(n):
         age_val = ages[i]
         disag_val = disag[i]
+        width_val = widths[i] if widths is not None else None
 
         if age_val > stale_age_hours:
             statuses[i] = "abstain"
@@ -120,6 +143,9 @@ def guarded_decision_rule(
         elif disag_val > max_disagreement_threshold:
             statuses[i] = "abstain"
             reasons[i] = "scenario_disagreement_exceeds_threshold"
+        elif width_val is not None and width_val > max_envelope_width_threshold:
+            statuses[i] = "abstain"
+            reasons[i] = "envelope_width_exceeds_threshold"
         elif age_val > caution_age_hours:
             statuses[i] = "caution"
             reasons[i] = "reduced_sensor_freshness"
@@ -458,8 +484,9 @@ class SAGEForecaster(BaseForecaster):
         lower_envelope = np.min(lowers, axis=0)
         upper_envelope = np.max(uppers, axis=0)
 
-        # Scenario disagreement: max_gamma U_gamma - min_gamma L_gamma
-        scenario_disagreement = upper_envelope - lower_envelope
+        # Disentangled sensitivity scenario disagreement: max_gamma U_gamma - min_gamma U_gamma
+        scenario_disagreement = np.max(uppers, axis=0) - np.min(uppers, axis=0)
+        envelope_width = upper_envelope - lower_envelope
 
         # Determine age of observations for freshness guard
         if "age_hours" in X.columns:
@@ -478,6 +505,8 @@ class SAGEForecaster(BaseForecaster):
             stale_age_hours=self.config.stale_age_hours,
             caution_age_hours=self.config.caution_age_hours,
             caution_disagreement_ratio=self.config.caution_disagreement_ratio,
+            envelope_width=envelope_width,
+            max_envelope_width_threshold=self.config.max_envelope_width_threshold,
         )
 
         return SAGEResult(
@@ -489,6 +518,7 @@ class SAGEForecaster(BaseForecaster):
             reason=np.asarray(reasons),
             effective_sample_size=self.effective_sample_size,
             gamma_intervals=scenarios,
+            envelope_width=envelope_width,
         )
 
     def guarded_decision(
@@ -496,6 +526,7 @@ class SAGEForecaster(BaseForecaster):
         scenario_disagreement: np.ndarray | float,
         effective_sample_size: float | None = None,
         age_hours: np.ndarray | float = 0.0,
+        envelope_width: np.ndarray | float | None = None,
     ) -> tuple[Any, Any]:
         """Evaluate guarded decision rule using this forecaster's config and state."""
         ess = self.effective_sample_size if effective_sample_size is None else effective_sample_size
@@ -508,4 +539,6 @@ class SAGEForecaster(BaseForecaster):
             stale_age_hours=self.config.stale_age_hours,
             caution_age_hours=self.config.caution_age_hours,
             caution_disagreement_ratio=self.config.caution_disagreement_ratio,
+            envelope_width=envelope_width,
+            max_envelope_width_threshold=self.config.max_envelope_width_threshold,
         )

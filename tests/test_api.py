@@ -36,6 +36,36 @@ def test_health_and_healthz():
         assert "timestamp" in data
 
 
+def test_health_ready():
+    """Verify readiness probe checks DB connection and serving model availability."""
+    for path in ["/health/ready", "/api/v1/health/ready"]:
+        res = client.get(path)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["status"] in {"ready", "not_ready"}
+        assert "database_connected" in data
+        assert "model_loaded" in data
+        assert "model_version" in data
+        if data["database_connected"] and data["model_loaded"]:
+            assert data["status"] == "ready"
+            assert data["model_version"] == "1.0.0"
+
+
+def test_model_status():
+    """Verify model status endpoint returns cryptographic manifest metadata and verification."""
+    res = client.get("/api/v1/model/status")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["model_id"] == "sage_pilot_q1_2024"
+    assert data["version"] == "1.0.0"
+    assert data["algorithm"] == "SAGE-LIGHTGBM"
+    assert data["nominal_coverage"] == 0.90
+    assert "dataset_hash" in data
+    assert "sha256" in data
+    assert data["artifact_exists"] is True
+    assert data["verified"] is True
+
+
 def test_list_stations():
     """Verify station catalog returns stations with availability and coordinates."""
     res = client.get("/api/v1/stations")
@@ -290,3 +320,86 @@ def test_admin_concurrency_lock():
         assert not _ADMIN_EXECUTION_LOCK.locked()
 
     asyncio.run(_test())
+
+
+def test_fail_closed_model_artifact_missing_or_corrupted(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Verify API fails closed with HTTP 503 and does NOT train on request path when artifact is missing or corrupted."""
+    import sensorguard.api as api_mod
+
+    # Reset in-memory cached model
+    saved_model = api_mod._CACHED_SAGE_MODEL
+    api_mod._CACHED_SAGE_MODEL = None
+
+    try:
+        # Case 1: Missing model artifact
+        missing_path = tmp_path / "nonexistent_model.joblib"
+        monkeypatch.setattr(api_mod, "MODEL_PATH", missing_path)
+
+        res_missing = client.get("/api/v1/stations/1/forecasts")
+        assert res_missing.status_code == 503
+        assert (
+            "Model artifact unavailable, corrupted, or untrusted. Offline training required."
+            in res_missing.json()["detail"]
+        )
+
+        # Case 2: Tampered / Corrupted model artifact (hash mismatch)
+        corrupted_path = tmp_path / "corrupted_model.joblib"
+        corrupted_path.write_bytes(b"tampered_bytes_arbitrary_data")
+        monkeypatch.setattr(api_mod, "MODEL_PATH", corrupted_path)
+
+        res_corrupt = client.get("/api/v1/stations/1/forecasts")
+        assert res_corrupt.status_code == 503
+        assert (
+            "Model artifact unavailable, corrupted, or untrusted. Offline training required."
+            in res_corrupt.json()["detail"]
+        )
+
+        # Verify that no model was dynamically trained or cached
+        assert api_mod._CACHED_SAGE_MODEL is None
+
+    finally:
+        # Restore original cached model
+        api_mod._CACHED_SAGE_MODEL = saved_model
+
+
+def test_cache_invalidation_on_ingestion(monkeypatch: pytest.MonkeyPatch):
+    """Verify spatiotemporal feature cache is invalidated on admin ingestion and scheduler polling."""
+    import asyncio
+
+    import sensorguard.api as api_mod
+    from sensorguard.db.session import create_db_engine, get_session_factory
+
+    engine = create_db_engine()
+    session_factory = get_session_factory(engine)
+
+    # 1. Populate cache
+    with session_factory() as session:
+        api_mod.get_cached_pilot_features(session)
+    assert api_mod._CACHED_FEATURE_DF is not None
+
+    # 2. Invalidate manually
+    api_mod.invalidate_pilot_feature_cache()
+    assert api_mod._CACHED_FEATURE_DF is None
+
+    # 3. Invalidate via admin ingest endpoint
+    with session_factory() as session:
+        api_mod.get_cached_pilot_features(session)
+    assert api_mod._CACHED_FEATURE_DF is not None
+
+    monkeypatch.setenv("ADMIN_API_KEY", TEST_ADMIN_KEY)
+    res_ingest = client.post(
+        "/api/v1/admin/ingest",
+        json={"days": 1},
+        headers={"X-Admin-Key": TEST_ADMIN_KEY},
+    )
+    assert res_ingest.status_code == 200
+    assert api_mod._CACHED_FEATURE_DF is None
+
+    # 4. Invalidate via scheduler poll_once
+    with session_factory() as session:
+        api_mod.get_cached_pilot_features(session)
+    assert api_mod._CACHED_FEATURE_DF is not None
+
+    scheduler = IngestScheduler(config=SchedulerConfig(poll_interval_seconds=1))
+    asyncio.run(scheduler.poll_once())
+    assert api_mod._CACHED_FEATURE_DF is None

@@ -226,7 +226,7 @@ def build_ablation_model(
     condition: str,
     feature_cols: list[str],
     nominal_coverage: float = 0.90,
-    max_disagreement_threshold: float = 20.0,
+    max_disagreement_threshold: float = 8.0,
 ) -> tuple[SAGEForecaster, list[str]]:
     """Configure SAGE model and feature subset for a specific ablation condition."""
     if condition == "full_sage":
@@ -294,7 +294,7 @@ def run_sage_ablation_suite(
     splits: DatasetSplits,
     seeds: list[int] | None = None,
     nominal_coverage: float = 0.90,
-    max_disagreement_threshold: float = 20.0,
+    max_disagreement_threshold: float = 8.0,
     track_mlflow: bool = True,
     mlflow_experiment: str = "SensorGuard-SAGE-Ablations",
 ) -> dict[str, Any]:
