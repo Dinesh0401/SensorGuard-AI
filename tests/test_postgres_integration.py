@@ -15,12 +15,11 @@ from pathlib import Path
 import httpx
 import joblib
 import pytest
-from fastapi.testclient import TestClient
+from alembic.config import Config
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from alembic import command
-from alembic.config import Config
 from sensorguard.db.forecast_persistence import (
     get_latest_station_forecasts,
     materialize_station_forecasts,
@@ -29,6 +28,7 @@ from sensorguard.db.schema import (
     ForecastRecord,
     ForecastRun,
     Observation,
+    RawIngestBatch,
     Sensor,
     Station,
 )
@@ -191,12 +191,25 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
         assert len(as_of_late) == 1
         assert float(as_of_late.iloc[0]["value"]) == pytest.approx(19.8)
 
-        # Clean up synthetic station so pilot dataset counts stay exact
+        # Clean up synthetic station and raw batches so pilot dataset counts stay exact
+        batch_ids = [
+            row[0]
+            for row in session.execute(
+                select(RawIngestBatch.id).where(
+                    RawIngestBatch.endpoint == "/v3/sensors/9999011/hours"
+                )
+            ).all()
+        ]
         session.delete(station)
+        session.flush()
+        for bid in batch_ids:
+            batch = session.get(RawIngestBatch, bid)
+            if batch is not None:
+                session.delete(batch)
         session.commit()
 
 
-def test_postgres_forecast_persistence_and_api_roundtrip(pg_engine, tmp_path):
+def test_postgres_forecast_persistence_and_api_roundtrip(pg_engine):
     """Verify SHA-256 model load, ForecastRun/ForecastRecord persistence, and FastAPI queries."""
     manifest_path = ROOT_DIR / "artifacts" / "models" / "manifest.json"
     model_path = ROOT_DIR / "artifacts" / "models" / "sage_pilot_q1_2024.joblib"
@@ -220,10 +233,11 @@ def test_postgres_forecast_persistence_and_api_roundtrip(pg_engine, tmp_path):
             limit_per_station=24,
             notes="M7.1 PostgreSQL persistence verification",
         )
+        assert isinstance(run, ForecastRun)
         assert run.id is not None
 
         latest_run, records = get_latest_station_forecasts(session, station_id=1, limit=24)
-        assert latest_run is not None
+        assert isinstance(latest_run, ForecastRun)
         assert latest_run.id == run.id
         assert len(records) == 24
         assert all(isinstance(r, ForecastRecord) for r in records)
