@@ -22,7 +22,7 @@ jobs:
       - name: Database migration check
         run: alembic upgrade head
       - name: Unit and contract tests
-        run: pytest -q
+        run: pytest -v --tb=short
       - name: Compile source
         run: python -m compileall -q src
       - name: Deterministic research smoke test
