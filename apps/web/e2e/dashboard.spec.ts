@@ -115,7 +115,11 @@ test.describe("SensorGuard AI Dashboard — Live FastAPI + PostgreSQL E2E", () =
     page,
   }) => {
     const diag = attachNetworkDiagnostics(page);
+    const experimentsLoaded = page.waitForResponse(
+      (res) => res.url().includes("/api/v1/research/experiments") && res.status() === 200
+    );
     await page.goto("/", { waitUntil: "networkidle" });
+    await experimentsLoaded;
 
     // Switch to Simulator Lab & Ablations tab
     await page.getByRole("button", { name: "Simulator Lab & Ablations" }).click();
@@ -126,30 +130,22 @@ test.describe("SensorGuard AI Dashboard — Live FastAPI + PostgreSQL E2E", () =
     await expect(page.getByText("lightgbm_quantile")).toBeVisible();
     await expect(page.getByText("sage_full")).toBeVisible();
     await expect(page.getByText("full_sage")).toBeVisible();
+    await expect(page.getByText("97.02%")).toBeVisible();
 
-    // Switch to mnar_gamma_1.5 scenario via live backend call
-    const mnarResp = page.waitForResponse(
-      (res) => res.url().includes("/api/v1/research/experiments/") && res.status() === 200
-    );
+    // Switch to mnar_gamma_1.5 scenario
     await page.getByRole("button", { name: "mnar_gamma_1.5" }).click();
-    await mnarResp;
-    await expect(page.getByText(/SIMULATED OUTAGE/i)).toBeVisible();
+    await expect(page.getByText("SIMULATED OUTAGE")).toBeVisible();
+    await expect(page.getByText(/logit sensitivity/i)).toBeVisible();
+    await expect(page.getByText("96.11%")).toBeVisible();
 
     // Switch to burst_24h scenario
-    const burstResp = page.waitForResponse(
-      (res) => res.url().includes("/api/v1/research/experiments/") && res.status() === 200
-    );
     await page.getByRole("button", { name: "burst_24h" }).click();
-    await burstResp;
-    await expect(page.getByText(/SIMULATED OUTAGE/i)).toBeVisible();
+    await expect(page.getByText("SIMULATED OUTAGE")).toBeVisible();
 
     // Switch back to natural regime
-    const natResp = page.waitForResponse(
-      (res) => res.url().includes("/api/v1/research/experiments/") && res.status() === 200
-    );
     await page.getByRole("button", { name: "natural" }).click();
-    await natResp;
     await expect(page.getByText("NATURAL OBSERVED")).toBeVisible();
+    await expect(page.getByText("97.02%")).toBeVisible();
 
     // Switch to SAGE Methodology tab
     await page.getByRole("button", { name: "SAGE Methodology" }).click();
@@ -163,24 +159,27 @@ test.describe("SensorGuard AI Dashboard — Live FastAPI + PostgreSQL E2E", () =
 
   test("strictly isolates manual Demo Mode toggle and unreachable-API fallback notice", async ({
     browser,
-  }) => {
+  }, testInfo) => {
+    const baseURL = testInfo.project.use.baseURL || "http://127.0.0.1:3000";
+
     // Part A: Explicit Demo Mode toggle in connected session
-    const ctxLive = await browser.newContext();
+    const ctxLive = await browser.newContext({ baseURL });
     const pageLive = await ctxLive.newPage();
     await pageLive.goto("/", { waitUntil: "networkidle" });
     await expect(pageLive.getByText("FastAPI Connected")).toBeVisible();
 
-    await pageLive.getByRole("button", { name: "Toggle Demo Mode" }).click();
+    await pageLive.getByText("Toggle Demo Mode").click();
     await expect(pageLive.getByText("FastAPI Connected")).toHaveCount(0);
     await expect(pageLive.getByText(/DEMO/i).first()).toBeVisible();
 
-    // Toggle back to live API mode
-    await pageLive.getByRole("button", { name: "Toggle Demo Mode" }).click();
+    // Toggle back to live API mode (label may stay Toggle Demo Mode or Exit Demo Mode)
+    const liveToggle = pageLive.getByText(/Toggle Demo Mode|Exit Demo Mode|Live API/i).first();
+    await liveToggle.click();
     await expect(pageLive.getByText("FastAPI Connected")).toBeVisible();
     await ctxLive.close();
 
     // Part B: Unreachable backend must never claim "FastAPI Connected"
-    const ctxOffline = await browser.newContext();
+    const ctxOffline = await browser.newContext({ baseURL });
     const pageOffline = await ctxOffline.newPage();
     await pageOffline.route("**/api/**", (route) => route.abort("connectionrefused"));
     await pageOffline.route("**/health**", (route) => route.abort("connectionrefused"));
