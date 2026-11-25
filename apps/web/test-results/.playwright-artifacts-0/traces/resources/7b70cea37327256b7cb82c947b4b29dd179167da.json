@@ -1,1 +1,0 @@
-{"station_id":4,"station_name":"Bexley - Slade Green","total_observations":2146,"first_observed_at":"2024-01-01T06:30:00+05:30","last_observed_at":"2024-04-01T04:30:00+05:30","gap_rate_pct":1.69,"longest_consecutive_outage_hours":17.0,"status_distribution":{"HEALTHY":2146},"benchmark_metrics":{"mae":0.2806,"rmse":0.7984,"picp":0.9985,"mpiw":13.2257,"winkler_score":13.3467}}
