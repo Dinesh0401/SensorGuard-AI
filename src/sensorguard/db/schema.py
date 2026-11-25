@@ -250,12 +250,8 @@ class ForecastRecord(Base):
     sensor_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("sensors.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    decision_cutoff: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
-    target_time: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
-    )
+    decision_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    target_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     point_forecast: Mapped[float] = mapped_column(Float, nullable=False)
     lower_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
     upper_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -263,9 +259,7 @@ class ForecastRecord(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     abstain_reason: Mapped[str] = mapped_column(String(64), nullable=False, default="NONE")
     d_sensitivity: Mapped[float | None] = mapped_column(Float, nullable=True)
-    newest_source_observed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    newest_source_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feature_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     scenario_bounds_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(

@@ -37,9 +37,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_forecast_runs_model_id", "forecast_runs", ["model_id"], unique=False)
     op.create_index("ix_forecast_runs_issued_at", "forecast_runs", ["issued_at"], unique=False)
-    op.create_index(
-        "ix_forecast_runs_decision_cutoff", "forecast_runs", ["decision_cutoff"], unique=False
-    )
+    op.create_index("ix_forecast_runs_decision_cutoff", "forecast_runs", ["decision_cutoff"], unique=False)
 
     op.create_table(
         "forecasts",

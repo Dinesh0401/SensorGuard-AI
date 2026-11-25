@@ -82,9 +82,7 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
 
     with Session(bind=pg_engine) as session:
         # Clean synthetic test station if leftover from previous run
-        existing = session.scalars(
-            select(Station).where(Station.provider_location_id == 999901)
-        ).first()
+        existing = session.scalars(select(Station).where(Station.provider_location_id == 999901)).first()
         if existing is not None:
             session.delete(existing)
             session.commit()
@@ -103,6 +101,7 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
         session.commit()
 
         try:
+
             def handler_v1(request: httpx.Request) -> httpx.Response:
                 return httpx.Response(
                     200,
@@ -112,13 +111,9 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
                                 "datetime": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
                                 "period": {
                                     "datetimeFrom": {
-                                        "utc": (t_obs - timedelta(hours=1))
-                                        .isoformat()
-                                        .replace("+00:00", "Z")
+                                        "utc": (t_obs - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
                                     },
-                                    "datetimeTo": {
-                                        "utc": t_obs.isoformat().replace("+00:00", "Z")
-                                    },
+                                    "datetimeTo": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
                                 },
                                 "value": 14.2,
                                 "parameter": {"name": "pm25", "units": "µg/m³"},
@@ -195,9 +190,7 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
             batch_ids = [
                 row[0]
                 for row in session.execute(
-                    select(RawIngestBatch.id).where(
-                        RawIngestBatch.endpoint == "/v3/sensors/9999011/hours"
-                    )
+                    select(RawIngestBatch.id).where(RawIngestBatch.endpoint == "/v3/sensors/9999011/hours")
                 ).all()
             ]
             session.delete(station)

@@ -122,9 +122,7 @@ def migrate_sqlite_to_postgres(
             )
             existing_ids: set[int] = set()
             if existing_dst_count > 0 and "id" in dst_table.c:
-                existing_ids = {
-                    int(r[0]) for r in dst_conn.execute(select(dst_table.c.id)).fetchall()
-                }
+                existing_ids = {int(r[0]) for r in dst_conn.execute(select(dst_table.c.id)).fetchall()}
 
         inserted = 0
         skipped = 0
@@ -154,9 +152,7 @@ def migrate_sqlite_to_postgres(
                         inserted += len(rows_to_insert)
 
         with dst_engine.connect() as dst_conn:
-            final_dst_count = int(
-                dst_conn.execute(select(func.count()).select_from(dst_table)).scalar() or 0
-            )
+            final_dst_count = int(dst_conn.execute(select(func.count()).select_from(dst_table)).scalar() or 0)
 
         report[table_name] = {
             "source_rows": src_count,

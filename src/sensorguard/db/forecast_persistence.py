@@ -48,8 +48,7 @@ def materialize_station_forecasts(
         raise ValueError("Cannot materialize forecasts from an empty feature dataframe.")
 
     pm25_sensors = {
-        s.station_id: s.id
-        for s in session.scalars(select(Sensor).where(Sensor.parameter == "pm25")).all()
+        s.station_id: s.id for s in session.scalars(select(Sensor).where(Sensor.parameter == "pm25")).all()
     }
     if not pm25_sensors:
         pm25_sensors = {s.station_id: s.id for s in session.scalars(select(Sensor)).all()}
