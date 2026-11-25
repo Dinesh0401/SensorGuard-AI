@@ -73,6 +73,7 @@ logger = logging.getLogger(__name__)
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 _admin_request_history: list[float] = []
 
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Pre-warm verified model artifact and pilot feature caches per worker on startup."""
@@ -723,7 +724,11 @@ def _compute_station_forecasts_sync(
     """Build guarded station forecast response synchronously using cached slices when available."""
     cache_key = (station_id, limit, id(model), _CACHED_MODEL_LOAD_TIME)
     with _CACHE_LOCK:
-        if cache_key in _CACHED_FORECAST_RESPONSES and _CACHED_STATION_NAMES is not None and station_id in _CACHED_STATION_NAMES:
+        if (
+            cache_key in _CACHED_FORECAST_RESPONSES
+            and _CACHED_STATION_NAMES is not None
+            and station_id in _CACHED_STATION_NAMES
+        ):
             return _CACHED_FORECAST_RESPONSES[cache_key]
         cached_name = _CACHED_STATION_NAMES.get(station_id) if _CACHED_STATION_NAMES else None
 
