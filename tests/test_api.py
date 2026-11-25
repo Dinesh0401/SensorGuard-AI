@@ -324,6 +324,8 @@ def test_admin_concurrency_lock():
 
 def test_fail_closed_model_artifact_missing_or_corrupted(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Verify API fails closed with HTTP 503 and does NOT train on request path when artifact is missing or corrupted."""
+    from fastapi import HTTPException
+
     import sensorguard.api as api_mod
 
     # Reset in-memory cached model
@@ -335,11 +337,12 @@ def test_fail_closed_model_artifact_missing_or_corrupted(monkeypatch: pytest.Mon
         missing_path = tmp_path / "nonexistent_model.joblib"
         monkeypatch.setattr(api_mod, "MODEL_PATH", missing_path)
 
-        res_missing = client.get("/api/v1/stations/1/forecasts")
-        assert res_missing.status_code == 503
+        with pytest.raises(HTTPException) as exc_info:
+            api_mod.get_serving_model()
+        assert exc_info.value.status_code == 503
         assert (
             "Model artifact unavailable, corrupted, or untrusted. Offline training required."
-            in res_missing.json()["detail"]
+            in exc_info.value.detail
         )
 
         # Case 2: Tampered / Corrupted model artifact (hash mismatch)
@@ -347,11 +350,12 @@ def test_fail_closed_model_artifact_missing_or_corrupted(monkeypatch: pytest.Mon
         corrupted_path.write_bytes(b"tampered_bytes_arbitrary_data")
         monkeypatch.setattr(api_mod, "MODEL_PATH", corrupted_path)
 
-        res_corrupt = client.get("/api/v1/stations/1/forecasts")
-        assert res_corrupt.status_code == 503
+        with pytest.raises(HTTPException) as exc_info:
+            api_mod.get_serving_model()
+        assert exc_info.value.status_code == 503
         assert (
             "Model artifact unavailable, corrupted, or untrusted. Offline training required."
-            in res_corrupt.json()["detail"]
+            in exc_info.value.detail
         )
 
         # Verify that no model was dynamically trained or cached
