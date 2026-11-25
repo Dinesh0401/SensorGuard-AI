@@ -161,9 +161,7 @@ class AdaptiveSAGEForecaster(BaseForecaster):
             if feat_ts.isna().any():
                 raise ValueError("AdaptiveSAGE rejected rows with invalid 'feature_timestamp' values.")
             if (feat_ts > decision_ts).any():
-                raise ValueError(
-                    "Causal violation: 'feature_timestamp' occurs after forecast decision time."
-                )
+                raise ValueError("Causal violation: 'feature_timestamp' occurs after forecast decision time.")
 
         avail_ts = target_ts.copy()
         for avail_col in ("target_available_at", "label_available_at"):
@@ -209,7 +207,9 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         if sort_cols:
             sort_order = (
                 X_v.assign(_sort_ts=target_ts)
-                .sort_values(["_sort_ts"] + [c for c in sort_cols if c != self.config.timestamp_col], kind="mergesort")
+                .sort_values(
+                    ["_sort_ts"] + [c for c in sort_cols if c != self.config.timestamp_col], kind="mergesort"
+                )
                 .index.to_numpy()
             )
             X_v = X_v.iloc[sort_order].reset_index(drop=True)
@@ -217,16 +217,16 @@ class AdaptiveSAGEForecaster(BaseForecaster):
             target_ts = target_ts.iloc[sort_order].reset_index(drop=True)
             avail_ts = avail_ts.iloc[sort_order].reset_index(drop=True)
 
-        unique_ts = np.sort(target_ts.unique())
+        unique_ts = pd.DatetimeIndex(np.sort(target_ts.unique()), tz="UTC")
         if len(unique_ts) < 3:
             raise ValueError(
                 f"AdaptiveSAGE requires at least 3 distinct timestamps for causal splitting (got {len(unique_ts)})."
             )
 
         k_folds = max(3, min(self.config.n_oof_folds, len(unique_ts)))
-        ts_blocks = [b for b in np.array_split(unique_ts, k_folds) if len(b) > 0]
+        ts_blocks = [b for b in np.array_split(unique_ts.to_numpy(), k_folds) if len(b) > 0]
         if len(ts_blocks) < 2:
-            ts_blocks = np.array_split(unique_ts, 2)
+            ts_blocks = np.array_split(unique_ts.to_numpy(), 2)
 
         horizon_td = pd.Timedelta(hours=float(self.config.horizon_hours))
         embargo_td = pd.Timedelta(hours=float(self.config.horizon_hours) + float(self.config.embargo_hours))
@@ -236,18 +236,19 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         causal_eval_pred_list: list[np.ndarray] = []
         audit_records: list[dict[str, Any]] = []
 
-        target_arr = target_ts.to_numpy()
-        avail_arr = avail_ts.to_numpy()
-
         for k in range(1, len(ts_blocks)):
-            val_ts_set = ts_blocks[k]
-            t_val_start = pd.Timestamp(val_ts_set[0])
-            t_val_end = pd.Timestamp(val_ts_set[-1])
+            val_ts_set = pd.DatetimeIndex(ts_blocks[k])
+            if val_ts_set.tz is None:
+                val_ts_set = val_ts_set.tz_localize("UTC")
+            else:
+                val_ts_set = val_ts_set.tz_convert("UTC")
+            t_val_start = val_ts_set[0]
+            t_val_end = val_ts_set[-1]
             t_val_decision_start = t_val_start - horizon_td
             t_cutoff = t_val_start - embargo_td
 
-            train_mask = (avail_arr <= t_cutoff.to_datetime64()) & (target_arr < t_val_start.to_datetime64())
-            val_mask = (target_arr >= t_val_start.to_datetime64()) & (target_arr <= t_val_end.to_datetime64())
+            train_mask = ((avail_ts <= t_cutoff) & (target_ts < t_val_start)).to_numpy()
+            val_mask = ((target_ts >= t_val_start) & (target_ts <= t_val_end)).to_numpy()
 
             train_idx = np.flatnonzero(train_mask)
             val_idx = np.flatnonzero(val_mask)
@@ -255,10 +256,12 @@ class AdaptiveSAGEForecaster(BaseForecaster):
                 continue
 
             # Explicit invariant check: zero same-hour timestamp overlap & strict embargo gap
-            train_ts_unique = set(target_arr[train_idx].tolist())
-            val_ts_unique = set(target_arr[val_idx].tolist())
-            assert train_ts_unique.isdisjoint(val_ts_unique), "Same-hour timestamp leakage across fold boundary"
-            max_train_avail = pd.Timestamp(avail_arr[train_idx].max())
+            train_ts_unique = set(target_ts.iloc[train_idx].tolist())
+            val_ts_unique = set(target_ts.iloc[val_idx].tolist())
+            assert train_ts_unique.isdisjoint(val_ts_unique), (
+                "Same-hour timestamp leakage across fold boundary"
+            )
+            max_train_avail = pd.Timestamp(avail_ts.iloc[train_idx].max())
             if max_train_avail.tzinfo is None:
                 max_train_avail = max_train_avail.tz_localize("UTC")
             assert max_train_avail <= t_cutoff, "Train label availability violated causal embargo"
@@ -272,27 +275,18 @@ class AdaptiveSAGEForecaster(BaseForecaster):
             causal_eval_pred_list.append(sub_pred)
             causal_eval_res_list.append(e_k)
 
-            t_val_start_utc = t_val_start.tz_localize("UTC") if t_val_start.tzinfo is None else t_val_start
-            t_val_end_utc = t_val_end.tz_localize("UTC") if t_val_end.tzinfo is None else t_val_end
-            t_dec_utc = (
-                t_val_decision_start.tz_localize("UTC")
-                if t_val_decision_start.tzinfo is None
-                else t_val_decision_start
-            )
             audit_records.append(
                 {
-                    "fold": int(k),
-                    "train_n": int(len(train_idx)),
-                    "val_n": int(len(val_idx)),
-                    "train_unique_timestamps": int(len(train_ts_unique)),
-                    "val_unique_timestamps": int(len(val_ts_unique)),
+                    "fold": k,
+                    "train_n": len(train_idx),
+                    "val_n": len(val_idx),
+                    "train_unique_timestamps": len(train_ts_unique),
+                    "val_unique_timestamps": len(val_ts_unique),
                     "max_train_label_avail": max_train_avail.isoformat(),
-                    "val_decision_start": t_dec_utc.isoformat(),
-                    "val_min_timestamp": t_val_start_utc.isoformat(),
-                    "val_max_timestamp": t_val_end_utc.isoformat(),
-                    "embargo_gap_hours": round(
-                        (t_val_start_utc - max_train_avail).total_seconds() / 3600.0, 2
-                    ),
+                    "val_decision_start": t_val_decision_start.isoformat(),
+                    "val_min_timestamp": t_val_start.isoformat(),
+                    "val_max_timestamp": t_val_end.isoformat(),
+                    "embargo_gap_hours": round((t_val_start - max_train_avail).total_seconds() / 3600.0, 2),
                     "same_hour_disjoint": True,
                 }
             )

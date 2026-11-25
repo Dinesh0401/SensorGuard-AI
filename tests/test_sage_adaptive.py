@@ -124,7 +124,9 @@ def test_adaptive_sage_strict_causal_forward_splits_no_future_leakage():
         base_model_type="ridge",
     )
     model_base = AdaptiveSAGEForecaster(config=cfg)
-    idx_b, res_b, pred_b, audit_b = model_base.compute_causal_oof_residuals(panel, panel["target"].to_numpy())
+    _idx_b, res_b, pred_b, audit_b = model_base.compute_causal_oof_residuals(
+        panel, panel["target"].to_numpy()
+    )
 
     # 1. Complete unique timestamp splitting & embargo audit
     assert len(audit_b) == 2
@@ -174,7 +176,7 @@ def test_adaptive_sage_strict_causal_forward_splits_no_future_leakage():
 
 def test_adaptive_sage_rejects_untrustworthy_or_noncausal_timestamps():
     """Reject missing/NaT timestamps and causal violations across decision/feature/availability columns."""
-    train, cal, _ = _synthetic_heteroscedastic_split(n=120, seed=5)
+    train, _cal, _ = _synthetic_heteroscedastic_split(n=120, seed=5)
 
     # Missing timestamp column
     no_ts = train.drop(columns=["timestamp"])
@@ -201,6 +203,8 @@ def test_adaptive_sage_rejects_untrustworthy_or_noncausal_timestamps():
 
     # Invalid target_available_at preceding observation target
     bad_avail = train.copy()
-    bad_avail["target_available_at"] = pd.to_datetime(bad_avail["timestamp"], utc=True) - pd.Timedelta(hours=2)
+    bad_avail["target_available_at"] = pd.to_datetime(bad_avail["timestamp"], utc=True) - pd.Timedelta(
+        hours=2
+    )
     with pytest.raises(ValueError, match="Causal violation: 'target_available_at'"):
         AdaptiveSAGEForecaster().fit(bad_avail, bad_avail["target"].to_numpy())

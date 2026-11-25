@@ -38,11 +38,12 @@ def main() -> int:
     api_url = f"http://{api_host}:{api_port}"
     web_url = f"http://{api_host}:{web_port}"
 
-    # Auto-seed SQLite pilot database if not populated
+    # Auto-seed SQLite pilot database only if absent or empty
     from scripts.seed_pilot_db import seed_sqlite_pilot_db
 
     db_path = ROOT_DIR / "data" / "sensorguard.db"
-    seed_sqlite_pilot_db(db_path=db_path)
+    if not db_path.exists() or db_path.stat().st_size == 0:
+        seed_sqlite_pilot_db(db_path=db_path)
 
     env_api = os.environ.copy()
     env_api.setdefault("CORS_ORIGINS", f"http://localhost:{web_port},{web_url}")

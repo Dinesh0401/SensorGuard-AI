@@ -1,9 +1,10 @@
-"""Run rigorous M7.4 Adaptive Input-Dependent SAGE comparison & 8-fold LOSO evaluation.
+"""Run rigorous M7.4/M7.7 Adaptive Input-Dependent SAGE comparison & 8-fold LOSO evaluation.
 
-Evaluates pre-specified adaptive SAGE policies against static SAGE, Persistence,
-Split Conformal, CQR, Rolling Conformal, ACI, Covariate Propensity-Weighted MAR,
-Locally-Weighted MAR, and Observation-Gated Masked ACI on identical chronological splits,
-3 random outage seeds ([11, 42, 107]), and 8-fold Leave-One-Station-Out CV.
+Evaluates strictly causal timestamp-split adaptive SAGE policies against static SAGE,
+Persistence, Split Conformal, CQR, Rolling Conformal, ACI, Locally-Weighted MAR (gamma=0),
+and Observation-Gated Masked ACI across chronological test regimes (including extended 72h
+multi-station outage), 3 random outage seeds ([11, 42, 107]), paired identical masks /
+matched abstention budgets with time-block bootstrap 95% CIs, and 8-fold Leave-One-Station-Out CV.
 """
 
 from __future__ import annotations
@@ -49,6 +50,123 @@ from sensorguard.models.sage_adaptive import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _per_sample_arrays(
+    y_true: np.ndarray,
+    lower: np.ndarray,
+    upper: np.ndarray,
+    alpha: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return per-sample binary coverage, interval width, and Winkler score."""
+    cov = ((y_true >= lower) & (y_true <= upper)).astype(float)
+    width = upper - lower
+    penalty = (2.0 / alpha) * np.where(
+        y_true < lower,
+        lower - y_true,
+        np.where(y_true > upper, y_true - upper, 0.0),
+    )
+    winkler = width + penalty
+    return cov, width, winkler
+
+
+def _block_bootstrap_delta_ci(
+    df_meta: pd.DataFrame,
+    y_true: np.ndarray,
+    lo_a: np.ndarray,
+    hi_a: np.ndarray,
+    pub_a: np.ndarray,
+    lo_b: np.ndarray,
+    hi_b: np.ndarray,
+    pub_b: np.ndarray,
+    mask: np.ndarray,
+    alpha: float = 0.10,
+    n_boot: int = 800,
+    seed: int = 42,
+) -> dict[str, Any]:
+    """Compute paired (Model A - Model B) deltas with station-day block bootstrap 95% CIs."""
+    valid = (
+        mask
+        & np.isfinite(y_true)
+        & np.isfinite(lo_a)
+        & np.isfinite(hi_a)
+        & np.isfinite(lo_b)
+        & np.isfinite(hi_b)
+    )
+    n_pairs = int(valid.sum())
+    if n_pairs == 0:
+        return {"n_pairs": 0}
+
+    cov_a, wid_a, wink_a = _per_sample_arrays(y_true[valid], lo_a[valid], hi_a[valid], alpha=alpha)
+    cov_b, wid_b, wink_b = _per_sample_arrays(y_true[valid], lo_b[valid], hi_b[valid], alpha=alpha)
+    d_cov = cov_a - cov_b
+    d_wid = wid_a - wid_b
+    d_wink = wink_a - wink_b
+
+    # Station-day blocks preserve autocorrelation & cross-station clustering
+    sub_meta = df_meta.iloc[valid]
+    ts_day = pd.to_datetime(sub_meta["timestamp"], utc=True).dt.strftime("%Y-%m-%d")
+    block_keys = (sub_meta["station_id"].astype(str) + "_" + ts_day).to_numpy()
+    unique_blocks, inverse = np.unique(block_keys, return_inverse=True)
+    n_blocks = len(unique_blocks)
+
+    block_sums_cov = np.bincount(inverse, weights=d_cov, minlength=n_blocks)
+    block_sums_wid = np.bincount(inverse, weights=d_wid, minlength=n_blocks)
+    block_sums_wink = np.bincount(inverse, weights=d_wink, minlength=n_blocks)
+    block_counts = np.bincount(inverse, minlength=n_blocks).astype(float)
+
+    rng = np.random.default_rng(seed)
+    idx_mat = rng.integers(0, n_blocks, size=(n_boot, n_blocks))
+    den = np.maximum(block_counts[idx_mat].sum(axis=1), 1.0)
+    boot_cov = block_sums_cov[idx_mat].sum(axis=1) / den
+    boot_wid = block_sums_wid[idx_mat].sum(axis=1) / den
+    boot_wink = block_sums_wink[idx_mat].sum(axis=1) / den
+
+    return {
+        "n_pairs": n_pairs,
+        "n_station_day_blocks": int(n_blocks),
+        "a_picp": round(float(np.mean(cov_a)), 4),
+        "b_picp": round(float(np.mean(cov_b)), 4),
+        "a_mpiw": round(float(np.mean(wid_a)), 4),
+        "b_mpiw": round(float(np.mean(wid_b)), 4),
+        "a_winkler": round(float(np.mean(wink_a)), 4),
+        "b_winkler": round(float(np.mean(wink_b)), 4),
+        "delta_picp": round(float(np.mean(d_cov)), 4),
+        "delta_picp_ci95": [
+            round(float(np.quantile(boot_cov, 0.025)), 4),
+            round(float(np.quantile(boot_cov, 0.975)), 4),
+        ],
+        "delta_mpiw": round(float(np.mean(d_wid)), 4),
+        "delta_mpiw_ci95": [
+            round(float(np.quantile(boot_wid, 0.025)), 4),
+            round(float(np.quantile(boot_wid, 0.975)), 4),
+        ],
+        "delta_winkler": round(float(np.mean(d_wink)), 4),
+        "delta_winkler_ci95": [
+            round(float(np.quantile(boot_wink, 0.025)), 4),
+            round(float(np.quantile(boot_wink, 0.975)), 4),
+        ],
+    }
+
+
+def _match_abstention_mask(
+    base_pub: np.ndarray,
+    target_pub: np.ndarray,
+    uncertainty_score: np.ndarray,
+    y_true: np.ndarray,
+) -> np.ndarray:
+    """Abstain the exact additional count from base_pub to match target_pub's published sample count."""
+    valid = np.isfinite(y_true)
+    target_pub_valid = int((target_pub & valid).sum())
+    base_pub_valid = int((base_pub & valid).sum())
+    if base_pub_valid <= target_pub_valid:
+        return base_pub.copy()
+    extra_drop = base_pub_valid - target_pub_valid
+    candidate_idx = np.flatnonzero(base_pub & valid)
+    ranked_desc = candidate_idx[np.argsort(-uncertainty_score[candidate_idx], kind="mergesort")]
+    out_mask = base_pub.copy()
+    out_mask[ranked_desc[:extra_drop]] = False
+    return out_mask
 
 
 def _summarize_metrics(
@@ -124,7 +242,7 @@ def run_adaptive_research_suite() -> dict[str, Any]:
     y_cal = cal_df["target"].to_numpy()
     alpha = 0.10
 
-    # 1. Fit shared baselines once cleanly on identical splits
+    # 1. Fit shared baselines once cleanly on identical chronological splits
     persist = PersistenceForecaster().fit(train_df, y_tr)
     persist_cal = SplitConformalCalibrator(alpha=alpha).fit(y_cal, persist.predict(cal_df))
 
@@ -152,7 +270,7 @@ def run_adaptive_research_suite() -> dict[str, Any]:
     unfiltered_train_df = featured_df[featured_df["timestamp"] < cal_start_ts].copy()
     y_tr_unfiltered = unfiltered_train_df["target"].to_numpy()
 
-    # Locally-Weighted MAR Conformal (gamma=0.0 adaptive baseline isolating OOF s(x) without MNAR grid)
+    # Locally-Weighted MAR Conformal (gamma=0.0 adaptive baseline isolating causal OOF s(x) without MNAR grid)
     mar_local = AdaptiveSAGEForecaster(
         config=AdaptiveSAGEConfig(
             gamma_grid=(0.0,),
@@ -163,7 +281,18 @@ def run_adaptive_research_suite() -> dict[str, Any]:
         feature_columns=cols,
     ).fit(unfiltered_train_df, y_tr_unfiltered, cal_df, y_cal)
 
-    # Adaptive SAGE M7.4 candidate (fit once, evaluate under 3 pre-specified policies)
+    # Matched-coverage MAR (alpha calibrated strictly on X_cal to probe equal-coverage sharpness)
+    mar_local_80 = AdaptiveSAGEForecaster(
+        config=AdaptiveSAGEConfig(
+            gamma_grid=(0.0,),
+            nominal_coverage=0.80,
+            max_disagreement_threshold=9999.0,
+            propensity_risk_weight=0.0,
+        ),
+        feature_columns=cols,
+    ).fit(unfiltered_train_df, y_tr_unfiltered, cal_df, y_cal)
+
+    # Adaptive SAGE M7.7 causal timestamp-split candidate under 3 pre-specified policies
     sage_adap_tau8 = AdaptiveSAGEForecaster(
         config=AdaptiveSAGEConfig(
             gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
@@ -202,13 +331,16 @@ def run_adaptive_research_suite() -> dict[str, Any]:
     cal_preds_lgb = lgb_pt.predict(cal_df)
     cal_res_abs = np.abs(y_cal - cal_preds_lgb)
 
-    scenarios = ["natural", "mcar_20", "mnar_gamma_1.5", "burst_24h"]
+    scenarios = ["natural", "mcar_20", "mnar_gamma_1.5", "burst_24h", "extended_72h"]
     chron_results: dict[str, dict[str, Any]] = {}
+    paired_chronological: dict[str, Any] = {}
 
     for scen in scenarios:
-        seeds = [42] if scen == "natural" else list(DEFAULT_SEEDS)
+        seeds = [42] if scen in {"natural", "burst_24h", "extended_72h"} else list(DEFAULT_SEEDS)
         per_seed: dict[str, list[dict[str, Any]]] = {}
 
+        # Track seed=42 representative arrays for exact paired mask & block bootstrap comparison
+        rep_seed = 42
         for seed in seeds:
             scen_df, y_eval = prepare_scenario_test_data(
                 test_df=test_df,
@@ -260,7 +392,7 @@ def run_adaptive_research_suite() -> dict[str, Any]:
                 _summarize_metrics(y_eval, lgb_pred, r_lo, r_hi, base_pub)
             )
 
-            # Standard ACI (baseline comparison)
+            # Standard ACI
             aci = AdaptiveConformalInference(target_alpha=alpha, gamma=0.01)
             aci_base_q = float(np.quantile(cal_res_abs, 1.0 - alpha)) if cal_res_abs.size > 0 else 5.0
             a_lo = np.zeros(len(scen_df))
@@ -320,13 +452,28 @@ def run_adaptive_research_suite() -> dict[str, Any]:
                 )
             )
 
+            # Locally-Weighted MAR calibrated at 80% nominal (for sharpness calibration contrast)
+            mr80 = mar_local_80.predict_guarded(scen_df)
+            per_seed.setdefault("locally_weighted_mar_80", []).append(
+                _summarize_metrics(
+                    y_eval,
+                    mr80.point_forecast,
+                    mr80.lower_envelope,
+                    mr80.upper_envelope,
+                    mr80.status != "abstain",
+                    mr80.scenario_disagreement,
+                )
+            )
+
             # Adaptive SAGE variants
+            adap_res_map: dict[str, Any] = {}
             for label_a, m_obj in [
                 ("sage_adaptive_tau8", sage_adap_tau8),
                 ("sage_adaptive_cal95", sage_adap_cal95),
                 ("sage_adaptive_no_abstain", sage_adap_no_abstain),
             ]:
                 ar = m_obj.predict_guarded(scen_df)
+                adap_res_map[label_a] = ar
                 per_seed.setdefault(label_a, []).append(
                     _summarize_metrics(
                         y_eval,
@@ -337,6 +484,115 @@ def run_adaptive_research_suite() -> dict[str, Any]:
                         ar.scenario_disagreement,
                     )
                 )
+
+            if seed == rep_seed:
+                ar_tau8 = adap_res_map["sage_adaptive_tau8"]
+                ar_cal95 = adap_res_map["sage_adaptive_cal95"]
+                pub_tau8 = ar_tau8.status != "abstain"
+                pub_cal95 = ar_cal95.status != "abstain"
+                pub_mar = mr.status != "abstain"
+                all_valid_mask = np.isfinite(y_eval)
+
+                # Matched abstention budget for baselines (drop top spread equal to cal95 extra abstentions)
+                mar_budget_pub = _match_abstention_mask(
+                    pub_mar, pub_cal95, mr.upper_envelope - mr.lower_envelope, y_eval
+                )
+                cqr_budget_pub = _match_abstention_mask(base_pub, pub_cal95, c_hi - c_lo, y_eval)
+                aci_budget_pub = _match_abstention_mask(base_pub, pub_cal95, a_hi - a_lo, y_eval)
+
+                paired_chronological[scen] = {
+                    # Isolate pure local scale s(x) benefit (gamma=0 MAR vs Static LightGBM Split)
+                    "scale_isolation_mar_vs_lgb_split_all_valid": _block_bootstrap_delta_ci(
+                        scen_df,
+                        y_eval,
+                        mr.lower_envelope,
+                        mr.upper_envelope,
+                        pub_mar,
+                        s_lo,
+                        s_hi,
+                        base_pub,
+                        all_valid_mask,
+                    ),
+                    # Isolate pure MNAR gamma-grid shift under identical published mask (tau8 vs gamma=0 MAR)
+                    "grid_isolation_tau8_vs_mar_common_published": _block_bootstrap_delta_ci(
+                        scen_df,
+                        y_eval,
+                        ar_tau8.lower_envelope,
+                        ar_tau8.upper_envelope,
+                        pub_tau8,
+                        mr.lower_envelope,
+                        mr.upper_envelope,
+                        pub_mar,
+                        pub_tau8 & pub_mar,
+                    ),
+                    # Adaptive cal95 vs Static SAGE (common published mask)
+                    "adaptive_cal95_vs_static_sage_common_published": _block_bootstrap_delta_ci(
+                        scen_df,
+                        y_eval,
+                        ar_cal95.lower_envelope,
+                        ar_cal95.upper_envelope,
+                        pub_cal95,
+                        sr.lower_envelope,
+                        sr.upper_envelope,
+                        sr.status != "abstain",
+                        pub_cal95 & (sr.status != "abstain"),
+                    ),
+                    # Adaptive cal95 vs CQR under matched abstention budget mask intersection
+                    "adaptive_cal95_vs_cqr_matched_budget": {
+                        "cal95_n_pub": int((pub_cal95 & all_valid_mask).sum()),
+                        "cqr_budget_n_pub": int((cqr_budget_pub & all_valid_mask).sum()),
+                        "metrics_on_cal95_published": _block_bootstrap_delta_ci(
+                            scen_df,
+                            y_eval,
+                            ar_cal95.lower_envelope,
+                            ar_cal95.upper_envelope,
+                            pub_cal95,
+                            c_lo,
+                            c_hi,
+                            cqr_budget_pub,
+                            pub_cal95,
+                        ),
+                    },
+                    # Adaptive cal95 vs Locally-Weighted MAR under matched abstention budget
+                    "adaptive_cal95_vs_mar_matched_budget": {
+                        "cal95_n_pub": int((pub_cal95 & all_valid_mask).sum()),
+                        "mar_budget_n_pub": int((mar_budget_pub & all_valid_mask).sum()),
+                        "metrics_on_common_published": _block_bootstrap_delta_ci(
+                            scen_df,
+                            y_eval,
+                            ar_cal95.lower_envelope,
+                            ar_cal95.upper_envelope,
+                            pub_cal95,
+                            mr.lower_envelope,
+                            mr.upper_envelope,
+                            mar_budget_pub,
+                            pub_cal95 & mar_budget_pub,
+                        ),
+                    },
+                    # Adaptive cal95 vs Persistence & ACI on identical cal95 published subset
+                    "adaptive_cal95_vs_persistence_on_cal95_pub": _block_bootstrap_delta_ci(
+                        scen_df,
+                        y_eval,
+                        ar_cal95.lower_envelope,
+                        ar_cal95.upper_envelope,
+                        pub_cal95,
+                        p_lo,
+                        p_hi,
+                        base_pub,
+                        pub_cal95 & base_pub,
+                    ),
+                    "adaptive_cal95_vs_aci_matched_budget": _block_bootstrap_delta_ci(
+                        scen_df,
+                        y_eval,
+                        ar_cal95.lower_envelope,
+                        ar_cal95.upper_envelope,
+                        pub_cal95,
+                        a_lo,
+                        a_hi,
+                        aci_budget_pub,
+                        pub_cal95 & aci_budget_pub,
+                    ),
+                }
 
         # Aggregate across seeds
         scen_agg: dict[str, Any] = {}
@@ -363,23 +619,59 @@ def run_adaptive_research_suite() -> dict[str, Any]:
             if len(seed_list) == 1:
                 agg["picp_ci95"] = seed_list[0]["picp_ci95"]
                 agg["pub_picp_ci95"] = seed_list[0]["pub_picp_ci95"]
+                agg["n_valid"] = seed_list[0]["n_valid"]
+                agg["n_published"] = seed_list[0]["n_published"]
             scen_agg[m_key] = agg
         chron_results[scen] = scen_agg
 
-    # 2. 8-Fold Leave-One-Station-Out (LOSO) Natural Evaluation
+    # 2. 8-Fold Leave-One-Station-Out (LOSO) Paired Station Generalization
     loso_stations = sorted(featured_df["station_id"].unique(), key=int)
     loso_results: dict[str, Any] = {}
+    loso_station_deltas_tau8_vs_mar: list[dict[str, float]] = []
+    loso_station_deltas_cal95_vs_cqr: list[dict[str, float]] = []
 
     for held_st in loso_stations:
         other_sts = [s for s in loso_stations if s != held_st]
         other_coords = {k: v for k, v in station_coords.items() if k in other_sts}
         tr_cal_df = featured_df[featured_df["station_id"].isin(other_sts)].copy()
-        te_df = featured_df[featured_df["station_id"] == held_st].copy()
+        te_df = (
+            featured_df[featured_df["station_id"] == held_st].sort_values("timestamp").reset_index(drop=True)
+        )
         sp_o = partition_dataset(tr_cal_df, other_coords, train_pct=0.75, cal_pct=0.25)
 
         y_t_o = sp_o.train["target"].to_numpy()
         y_c_o = sp_o.calibrate["target"].to_numpy()
         o_cols = sp_o.feature_columns
+
+        # Unfiltered pre-cal training window on training stations
+        cal_start_o = sp_o.calibrate["timestamp"].min()
+        unf_tr_o = tr_cal_df[tr_cal_df["timestamp"] < cal_start_o].copy()
+        y_unf_tr_o = unf_tr_o["target"].to_numpy()
+
+        # Persistence
+        p_o = PersistenceForecaster().fit(sp_o.train, y_t_o)
+        p_cal_o = SplitConformalCalibrator(alpha=alpha).fit(y_c_o, p_o.predict(sp_o.calibrate))
+        p_pred_o = p_o.predict(te_df)
+        p_lo_o, p_hi_o = p_cal_o.predict_interval(p_pred_o)
+
+        # LightGBM point + ACI
+        lgb_o = LightGBMPointForecaster(feature_columns=o_cols).fit(sp_o.train, y_t_o)
+        if hasattr(lgb_o.model, "set_params"):
+            lgb_o.model.set_params(n_jobs=1)
+        cal_res_o = np.abs(y_c_o - lgb_o.predict(sp_o.calibrate))
+        te_pred_o = lgb_o.predict(te_df)
+        te_rep_o = te_df["reported"].fillna(False).to_numpy(dtype=bool)
+        y_te_o = te_df["target"].to_numpy()
+
+        aci_o = AdaptiveConformalInference(target_alpha=alpha, gamma=0.01)
+        a_lo_o = np.zeros(len(te_df))
+        a_hi_o = np.zeros(len(te_df))
+        for idx_o in range(len(te_df)):
+            sc_o = float(np.quantile(cal_res_o, 1.0 - aci_o.current_alpha)) if cal_res_o.size > 0 else 5.0
+            a_lo_o[idx_o] = max(0.0, float(te_pred_o[idx_o]) - sc_o)
+            a_hi_o[idx_o] = float(te_pred_o[idx_o]) + sc_o
+            if te_rep_o[idx_o] and np.isfinite(y_te_o[idx_o]):
+                aci_o.step(bool(a_lo_o[idx_o] <= y_te_o[idx_o] <= a_hi_o[idx_o]))
 
         # CQR
         q_m = LightGBMQuantileForecaster(feature_columns=o_cols, quantiles=(0.05, 0.50, 0.95)).fit(
@@ -390,6 +682,7 @@ def run_adaptive_research_suite() -> dict[str, Any]:
         tq_o = q_m.predict_quantiles(te_df)
         c_lo_o, c_hi_o = cqr_o.predict_interval(tq_o[0.05], tq_o[0.95])
         b_stat, _ = policy(te_df["age_hours"].to_numpy())
+        b_pub_o = b_stat != "abstain"
 
         # Static SAGE
         st_sage = SAGEForecaster(
@@ -398,16 +691,60 @@ def run_adaptive_research_suite() -> dict[str, Any]:
         ).fit(sp_o.train, y_t_o, sp_o.calibrate, y_c_o)
         sr_o = st_sage.predict_guarded(te_df)
 
-        # Adaptive SAGE (cal_p95 & fixed tau=8)
+        # Locally-Weighted MAR (gamma=0 adaptive control)
+        mar_o = AdaptiveSAGEForecaster(
+            config=AdaptiveSAGEConfig(
+                gamma_grid=(0.0,),
+                nominal_coverage=0.90,
+                max_disagreement_threshold=9999.0,
+                propensity_risk_weight=0.0,
+            ),
+            feature_columns=o_cols,
+        ).fit(unf_tr_o, y_unf_tr_o, sp_o.calibrate, y_c_o)
+        mr_o = mar_o.predict_guarded(te_df)
+
+        # Adaptive SAGE tau=8 and cal_p95
+        ad_sage_t8 = AdaptiveSAGEForecaster(
+            config=AdaptiveSAGEConfig(nominal_coverage=0.90, max_disagreement_threshold=8.0),
+            feature_columns=o_cols,
+        ).fit(unf_tr_o, y_unf_tr_o, sp_o.calibrate, y_c_o)
+        at8_o = ad_sage_t8.predict_guarded(te_df)
+
         ad_sage_c95 = AdaptiveSAGEForecaster(
             config=AdaptiveSAGEConfig(nominal_coverage=0.90, max_disagreement_threshold="cal_p95"),
             feature_columns=o_cols,
-        ).fit(sp_o.train, y_t_o, sp_o.calibrate, y_c_o)
+        ).fit(unf_tr_o, y_unf_tr_o, sp_o.calibrate, y_c_o)
         ar_o = ad_sage_c95.predict_guarded(te_df)
 
-        y_te_o = te_df["target"].to_numpy()
+        tau8_vs_mar = _block_bootstrap_delta_ci(
+            te_df,
+            y_te_o,
+            at8_o.lower_envelope,
+            at8_o.upper_envelope,
+            at8_o.status != "abstain",
+            mr_o.lower_envelope,
+            mr_o.upper_envelope,
+            mr_o.status != "abstain",
+            (at8_o.status != "abstain") & (mr_o.status != "abstain"),
+        )
+        cal95_vs_cqr = _block_bootstrap_delta_ci(
+            te_df,
+            y_te_o,
+            ar_o.lower_envelope,
+            ar_o.upper_envelope,
+            ar_o.status != "abstain",
+            c_lo_o,
+            c_hi_o,
+            b_pub_o,
+            (ar_o.status != "abstain") & b_pub_o,
+        )
+        loso_station_deltas_tau8_vs_mar.append(tau8_vs_mar)
+        loso_station_deltas_cal95_vs_cqr.append(cal95_vs_cqr)
+
         loso_results[f"station_{held_st}"] = {
-            "lightgbm_cqr": _summarize_metrics(y_te_o, tq_o[0.50], c_lo_o, c_hi_o, b_stat != "abstain"),
+            "persistence": _summarize_metrics(y_te_o, p_pred_o, p_lo_o, p_hi_o, b_pub_o),
+            "lightgbm_aci": _summarize_metrics(y_te_o, te_pred_o, a_lo_o, a_hi_o, b_pub_o),
+            "lightgbm_cqr": _summarize_metrics(y_te_o, tq_o[0.50], c_lo_o, c_hi_o, b_pub_o),
             "sage_static": _summarize_metrics(
                 y_te_o,
                 sr_o.point_forecast,
@@ -415,6 +752,22 @@ def run_adaptive_research_suite() -> dict[str, Any]:
                 sr_o.upper_envelope,
                 sr_o.status != "abstain",
                 sr_o.scenario_disagreement,
+            ),
+            "locally_weighted_mar": _summarize_metrics(
+                y_te_o,
+                mr_o.point_forecast,
+                mr_o.lower_envelope,
+                mr_o.upper_envelope,
+                mr_o.status != "abstain",
+                mr_o.scenario_disagreement,
+            ),
+            "sage_adaptive_tau8": _summarize_metrics(
+                y_te_o,
+                at8_o.point_forecast,
+                at8_o.lower_envelope,
+                at8_o.upper_envelope,
+                at8_o.status != "abstain",
+                at8_o.scenario_disagreement,
             ),
             "sage_adaptive_cal95": _summarize_metrics(
                 y_te_o,
@@ -425,12 +778,55 @@ def run_adaptive_research_suite() -> dict[str, Any]:
                 ar_o.scenario_disagreement,
             ),
             "cal_p95_threshold": round(ad_sage_c95.resolved_disagreement_threshold, 4),
+            "paired_tau8_vs_mar_common_pub": tau8_vs_mar,
+            "paired_cal95_vs_cqr_common_pub": cal95_vs_cqr,
         }
 
+    # Aggregate across all 8 held-out stations (mean & range across stations)
+    def _agg_loso_metric(model_key: str, field: str) -> float:
+        return round(
+            float(np.mean([loso_results[f"station_{s}"][model_key][field] for s in loso_stations])), 4
+        )
+
+    loso_summary = {
+        "n_stations": len(loso_stations),
+        "station_mean_metrics": {
+            m: {
+                "picp": _agg_loso_metric(m, "picp"),
+                "published_picp": _agg_loso_metric(m, "published_picp"),
+                "mpiw": _agg_loso_metric(m, "mpiw"),
+                "published_mpiw": _agg_loso_metric(m, "published_mpiw"),
+                "winkler": _agg_loso_metric(m, "winkler"),
+                "abstention_rate": _agg_loso_metric(m, "abstention_rate"),
+            }
+            for m in [
+                "persistence",
+                "lightgbm_aci",
+                "lightgbm_cqr",
+                "sage_static",
+                "locally_weighted_mar",
+                "sage_adaptive_tau8",
+                "sage_adaptive_cal95",
+            ]
+        },
+        "mean_paired_tau8_minus_mar_winkler": round(
+            float(np.mean([d["delta_winkler"] for d in loso_station_deltas_tau8_vs_mar])), 4
+        ),
+        "mean_paired_cal95_minus_cqr_winkler": round(
+            float(np.mean([d["delta_winkler"] for d in loso_station_deltas_cal95_vs_cqr])), 4
+        ),
+    }
+
     summary = {
-        "study_id": f"SG-M74-ADAPTIVE-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
+        "study_id": f"SG-M77-ADAPTIVE-{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}",
         "dataset_hash": data_hash,
         "seeds": list(DEFAULT_SEEDS),
+        "causal_split_audit": {
+            "horizon_hours": sage_adap_cal95.config.horizon_hours,
+            "embargo_hours": sage_adap_cal95.config.embargo_hours,
+            "unique_timestamp_boundary_enforced": True,
+            "folds": sage_adap_cal95.causal_split_audit_,
+        },
         "adaptive_diagnostics": {
             "cal_disagreement_p90": round(sage_adap_cal95.calibrated_disagreement_p90, 4),
             "cal_disagreement_p95": round(sage_adap_cal95.calibrated_disagreement_p95, 4),
@@ -441,7 +837,9 @@ def run_adaptive_research_suite() -> dict[str, Any]:
             "max_scale": round(sage_adap_cal95.max_scale, 4),
         },
         "chronological_scenarios": chron_results,
+        "paired_comparisons": paired_chronological,
         "loso_natural": loso_results,
+        "loso_summary": loso_summary,
     }
     return summary
 
@@ -451,12 +849,36 @@ def main() -> int:
     out_path = Path("docs/audit/adaptive_sage_results.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    logger.info("Saved M7.4 adaptive SAGE research results to %s", out_path)
+    logger.info(
+        "Saved M7.7 adaptive SAGE research results to %s (study_id=%s)", out_path, summary["study_id"]
+    )
     print(json.dumps(summary["adaptive_diagnostics"], indent=2))
-    print("\n--- Natural Scenario ---")
-    print(json.dumps(summary["chronological_scenarios"]["natural"], indent=2))
+    print("\n--- Causal Split Audit ---")
+    print(json.dumps(summary["causal_split_audit"], indent=2))
+    print("\n--- Natural Scenario (key models) ---")
+    for k in [
+        "persistence",
+        "lightgbm_aci",
+        "lightgbm_cqr",
+        "sage_static",
+        "locally_weighted_mar",
+        "sage_adaptive_tau8",
+        "sage_adaptive_cal95",
+    ]:
+        print(k, "=>", json.dumps(summary["chronological_scenarios"]["natural"][k]))
     print("\n--- MNAR (gamma=1.5, 3-seed) ---")
-    print(json.dumps(summary["chronological_scenarios"]["mnar_gamma_1.5"], indent=2))
+    for k in [
+        "persistence",
+        "lightgbm_aci",
+        "lightgbm_cqr",
+        "sage_static",
+        "locally_weighted_mar",
+        "sage_adaptive_tau8",
+        "sage_adaptive_cal95",
+    ]:
+        print(k, "=>", json.dumps(summary["chronological_scenarios"]["mnar_gamma_1.5"][k]))
+    print("\n--- LOSO 8-Station Summary ---")
+    print(json.dumps(summary["loso_summary"], indent=2))
     return 0
 
 
