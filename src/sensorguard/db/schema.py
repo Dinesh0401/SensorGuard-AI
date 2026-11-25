@@ -199,3 +199,81 @@ class ForecastFeatureSnapshot(Base):
     )
 
     sensor: Mapped[Sensor] = relationship("Sensor")
+
+
+class ForecastRun(Base):
+    """Metadata record for a versioned batch or on-demand forecast execution.
+
+    Tracks the exact cryptographic model manifest, dataset hash, issue timestamp,
+    and causal decision cutoff used to generate persisted forecast intervals.
+    """
+
+    __tablename__ = "forecast_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    model_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    model_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    dataset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    algorithm: Mapped[str] = mapped_column(String(64), nullable=False, default="SAGE-LIGHTGBM")
+    nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+    decision_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    forecasts: Mapped[list[ForecastRecord]] = relationship(
+        "ForecastRecord", back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class ForecastRecord(Base):
+    """Persisted station forecast record with guarded interval and provenance metadata."""
+
+    __tablename__ = "forecasts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("forecast_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    station_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("stations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sensor_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("sensors.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    decision_cutoff: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    target_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    point_forecast: Mapped[float] = mapped_column(Float, nullable=False)
+    lower_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
+    upper_bound: Mapped[float | None] = mapped_column(Float, nullable=True)
+    nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    abstain_reason: Mapped[str] = mapped_column(String(64), nullable=False, default="NONE")
+    d_sensitivity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    newest_source_observed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    feature_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    scenario_bounds_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    run: Mapped[ForecastRun] = relationship("ForecastRun", back_populates="forecasts")
+    station: Mapped[Station] = relationship("Station")
+    sensor: Mapped[Sensor] = relationship("Sensor")
