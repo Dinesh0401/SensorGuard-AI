@@ -1,5 +1,8 @@
 # SensorGuard AI — Milestone 4.1 Evaluation & Research Integrity Audit
 
+> [!NOTE]
+> **Historical Milestone 4.1 Record:** Later corrected in Milestones 5.2–6.1 ([`docs/RESEARCH_REPORT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/RESEARCH_REPORT.md)) to fix threshold/disagreement alignment, distinguish the parametric logit sensitivity shift $\gamma$ from Rosenbaum's $\Gamma$, and clarify UK AURN multi-region geography.
+
 **Audit Status:** APPROVED (Passed Evaluation Integrity Gate)  
 **Evaluator:** Statistical Evaluation Reviewer & Senior ML Research Engineer  
 **Dataset Lineage Fingerprint:** `33805c42097fc86e` (SHA-256 Content Fingerprint)  
