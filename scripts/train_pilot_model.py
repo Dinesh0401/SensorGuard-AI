@@ -156,8 +156,8 @@ def main() -> int:
         print(f"Coverage Target:  {manifest.nominal_coverage * 100:.1f}%")
         print("================================================================")
         return 0
-    except Exception as e:
-        logger.exception("Offline training failed: %s", e)
+    except Exception:
+        logger.exception("Offline training failed")
         return 1
 
 

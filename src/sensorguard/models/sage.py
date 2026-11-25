@@ -79,7 +79,11 @@ class SAGEResult:
     @property
     def width(self) -> np.ndarray:
         """Width of the conservative prediction interval envelope."""
-        return self.envelope_width if self.envelope_width is not None else np.maximum(0.0, self.upper_envelope - self.lower_envelope)
+        return (
+            self.envelope_width
+            if self.envelope_width is not None
+            else np.maximum(0.0, self.upper_envelope - self.lower_envelope)
+        )
 
     @property
     def is_published(self) -> np.ndarray:

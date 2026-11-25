@@ -29,7 +29,7 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -39,10 +39,9 @@ from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.models.data import (
     build_spatiotemporal_features,
     load_pilot_dataset_from_db,
-    partition_dataset,
 )
 from sensorguard.models.manifest import ModelManifest
-from sensorguard.models.sage import SAGEConfig, SAGEForecaster
+from sensorguard.models.sage import SAGEForecaster
 from sensorguard.schemas import (
     AdminEvaluateRequest,
     AdminEvaluateResponse,
@@ -105,6 +104,7 @@ async def request_logging_middleware(request: Request, call_next):
             latency_ms,
         )
         raise
+
 
 _ENGINE = create_db_engine()
 _SESSION_FACTORY = get_session_factory(_ENGINE)
@@ -349,7 +349,7 @@ def health_ready(db: Session = Depends(get_db)) -> ReadinessResponse:
     try:
         db.scalar(select(func.count(Station.id)))
         db_ok = True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.error("Readiness check DB query failed: %s", e)
         db_ok = False
 
@@ -363,7 +363,7 @@ def health_ready(db: Session = Depends(get_db)) -> ReadinessResponse:
             model_version = manifest.version
         elif hasattr(model, "config"):
             model_version = f"SAGE-{model.config.base_model_type.upper()}-v1"
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning("Readiness check model loading failed: %s", e)
         model_ok = False
         model_version = "unavailable"

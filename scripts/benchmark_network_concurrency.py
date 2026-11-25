@@ -104,7 +104,7 @@ async def run_concurrent_tier(
     for _ in range(min(5, concurrency)):
         try:
             await client.get(url)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             pass
 
     wall_start = time.perf_counter()
