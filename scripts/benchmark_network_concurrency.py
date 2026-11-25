@@ -60,15 +60,15 @@ async def wait_for_server(base_url: str, timeout_seconds: float = 15.0) -> bool:
     """Poll health endpoint until server responds or timeout expires."""
     url = f"{base_url}/health"
     start_time = time.time()
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        while time.time() - start_time < timeout_seconds:
-            try:
+    while time.time() - start_time < timeout_seconds:
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
                 res = await client.get(url)
                 if res.status_code == 200:
                     return True
-            except (httpx.ConnectError, httpx.ReadError):
-                pass
-            await asyncio.sleep(0.3)
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException, httpx.HTTPError, OSError):
+            pass
+        await asyncio.sleep(0.4)
     return False
 
 
@@ -239,10 +239,13 @@ def main() -> int:
         port = args.port or find_available_port(8000)
         base_url = f"http://127.0.0.1:{port}"
         logger.info("Spawning real Uvicorn server on %s...", base_url)
+        env = {**os.environ, "PYTHONPATH": str(Path("src").resolve())}
         cmd = [
             sys.executable,
             "-m",
             "uvicorn",
+            "--app-dir",
+            "src",
             "sensorguard.api:app",
             "--host",
             "127.0.0.1",
@@ -251,7 +254,7 @@ def main() -> int:
             "--log-level",
             "warning",
         ]
-        server_process = subprocess.Popen(cmd)
+        server_process = subprocess.Popen(cmd, env=env)
 
     try:
         logger.info("Waiting for server readiness on %s/health...", base_url)
