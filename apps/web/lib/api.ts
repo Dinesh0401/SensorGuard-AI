@@ -125,10 +125,41 @@ export interface ExperimentListResponse {
   total_count: number;
 }
 
+export interface ScenarioMethodMetrics {
+  mae?: number | null;
+  rmse?: number | null;
+  picp?: number | null;
+  published_picp?: number | null;
+  mpiw?: number | null;
+  winkler_score?: number | null;
+  worst_stratum_coverage_gap?: number | null;
+  abstention_rate?: number | null;
+}
+
+export interface ScenarioMethodEntry {
+  calibrator?: string;
+  metrics?: ScenarioMethodMetrics;
+}
+
+export interface AblationAggregateStats {
+  picp_mean: number;
+  published_picp_mean: number;
+  mpiw_mean: number;
+  winkler_score_mean: number;
+  abstention_rate_mean: number;
+  mean_disagreement_mean: number;
+}
+
+export interface ExperimentDetailPayload {
+  scenarios?: Record<string, Record<string, ScenarioMethodEntry>>;
+  aggregates?: Record<string, Record<string, AblationAggregateStats>>;
+  [key: string]: unknown;
+}
+
 export interface ExperimentDetailResponse {
   experiment_id: string;
   title: string;
-  details: Record<string, any>;
+  details: ExperimentDetailPayload;
   research_caveats: string[];
 }
 
@@ -143,7 +174,7 @@ export interface ModelStatusResponse {
   verified: boolean;
   model_path: string;
   artifact_exists: boolean;
-  extra?: Record<string, any> | null;
+  extra?: Record<string, unknown> | null;
 }
 
 export class ApiError extends Error {

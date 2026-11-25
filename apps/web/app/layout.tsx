@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "SensorGuard AI — Private Staging Dashboard",
-  description: "Private staging evaluation interface for SensorGuard AI Q1 2024 London Pilot Network.",
+  description: "Private staging evaluation interface for SensorGuard AI Q1 2024 UK AURN Pilot Network (8 stations).",
 };
 
 export default function RootLayout({

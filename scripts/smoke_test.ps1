@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
-# SensorGuard AI — smoke test script
+# SensorGuard AI — API & Frontend smoke test script
 # Usage: .\scripts\smoke_test.ps1 [-BaseUrl http://localhost:8000]
-# Requires: curl or Invoke-WebRequest, jq (optional)
 
 param(
-    [string]$BaseUrl = "http://localhost:8000"
+    [string]$BaseUrl = "http://localhost:8000",
+    [int]$StationId = 1
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,26 +31,30 @@ Write-Host "SensorGuard AI — Smoke Test" -ForegroundColor Cyan
 Write-Host "Base URL: $BaseUrl"
 Write-Host "─────────────────────────────────────────"
 
-# Health
-Check-Endpoint "GET /health"               "$BaseUrl/health"
+Check-Endpoint "GET /health"                                      "$BaseUrl/health"
+Check-Endpoint "GET /health/ready"                                "$BaseUrl/health/ready"
+Check-Endpoint "GET /docs"                                        "$BaseUrl/docs"
+Check-Endpoint "GET /api/v1/model/status"                         "$BaseUrl/api/v1/model/status"
+Check-Endpoint "GET /api/v1/stations"                             "$BaseUrl/api/v1/stations"
+Check-Endpoint "GET /api/v1/stations/$StationId/observations"     "$BaseUrl/api/v1/stations/$StationId/observations?limit=24"
+Check-Endpoint "GET /api/v1/stations/$StationId/forecasts"        "$BaseUrl/api/v1/stations/$StationId/forecasts?limit=24"
+Check-Endpoint "GET /api/v1/stations/$StationId/reliability"      "$BaseUrl/api/v1/stations/$StationId/reliability"
+Check-Endpoint "GET /api/v1/research/experiments"                 "$BaseUrl/api/v1/research/experiments"
 
-# OpenAPI docs (confirms routes registered)
-Check-Endpoint "GET /docs"                 "$BaseUrl/docs"
-
-# Stations
-Check-Endpoint "GET /api/v1/stations"      "$BaseUrl/api/v1/stations"
-
-# Latest observations
-Check-Endpoint "GET /api/v1/observations/latest" "$BaseUrl/api/v1/observations/latest"
-
-# Model status
-Check-Endpoint "GET /api/v1/model/status"  "$BaseUrl/api/v1/model/status"
-
-# Experiment list
-Check-Endpoint "GET /api/v1/research/experiments" "$BaseUrl/api/v1/research/experiments"
-
-# Forecasts (station 1, 1-hour horizon)
-Check-Endpoint "GET /api/v1/forecast/1"    "$BaseUrl/api/v1/forecast/1?horizon_hours=1"
+# Verify fail-closed / auth rejection on protected admin endpoint without valid key
+try {
+    $res = Invoke-WebRequest -Uri "$BaseUrl/api/v1/admin/ingest" -Method Post -ContentType "application/json" -Body '{"days":1}' -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
+    Write-Host "  [FAIL] POST /api/v1/admin/ingest unauthenticated returned $($res.StatusCode)" -ForegroundColor Red
+    $failures++
+} catch {
+    $code = [int]$_.Exception.Response.StatusCode
+    if ($code -in @(401, 422, 503)) {
+        Write-Host "  [PASS] POST /api/v1/admin/ingest rejected unauthenticated ($code)" -ForegroundColor Green
+    } else {
+        Write-Host "  [FAIL] POST /api/v1/admin/ingest unexpected status $code" -ForegroundColor Red
+        $failures++
+    }
+}
 
 Write-Host "─────────────────────────────────────────"
 if ($failures -eq 0) {

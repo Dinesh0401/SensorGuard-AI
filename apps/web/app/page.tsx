@@ -48,12 +48,12 @@ const SCENARIO_LABELS: Record<
     description:
       "Synthetic independent masking (20%). Evaluator-only ground truth retained separately for unbiased coverage measurement.",
   },
-  mnar_gamma_1.5: {
-    title: "MNAR (Gamma = 1.5 High-PM2.5 Dropout)",
+  "mnar_gamma_1.5": {
+    title: "MNAR (γ = 1.5 High-PM2.5 Dropout)",
     badge: "SIMULATED OUTAGE",
     isSimulated: true,
     description:
-      "Target-dependent nonrandom blackout favoring elevated pollution events. Features rebuilt strictly from visible history.",
+      "Target-dependent nonrandom blackout parameterized by logit sensitivity γ = 1.5. Features rebuilt strictly from visible history.",
   },
   burst_24h: {
     title: "Contiguous 24-Hour Outage Burst",
@@ -346,7 +346,7 @@ export default function StagingDashboard() {
   const liveAblationRows = useMemo(() => {
     const agg = ablationDetail?.details?.aggregates?.[selectedScenario] || null;
     if (!agg) return null;
-    return Object.entries(agg).map(([cond, stats]: [string, any]) => ({
+    return Object.entries(agg).map(([cond, stats]) => ({
       condition: cond,
       picp_mean: stats.picp_mean,
       published_picp_mean: stats.published_picp_mean,
@@ -695,13 +695,13 @@ export default function StagingDashboard() {
                           className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200 font-mono"
                         >
                           <option value="envelope">
-                            Conservative Union Envelope [All Γ]
+                            Conservative Union Envelope [All γ]
                           </option>
-                          <option value="0">Highlight Γ = 0.0 (MAR)</option>
-                          <option value="0.5">Highlight Γ = 0.5</option>
-                          <option value="1">Highlight Γ = 1.0 (Moderate MNAR)</option>
-                          <option value="1.5">Highlight Γ = 1.5</option>
-                          <option value="2">Highlight Γ = 2.0 (Severe MNAR)</option>
+                          <option value="0">Highlight γ = 0.0 (MAR)</option>
+                          <option value="0.5">Highlight γ = 0.5</option>
+                          <option value="1">Highlight γ = 1.0</option>
+                          <option value="1.5">Highlight γ = 1.5</option>
+                          <option value="2">Highlight γ = 2.0 (Severe MNAR)</option>
                         </select>
                       </div>
                     </div>
@@ -726,7 +726,7 @@ export default function StagingDashboard() {
                         {selectedGammaNum !== null && (
                           <span className="flex items-center gap-1.5 text-amber-300">
                             <span className="w-3 h-2 bg-amber-400/25 border border-amber-400 inline-block rounded-sm"></span>
-                            Γ={selectedGammaNum.toFixed(1)} Interval
+                            γ={selectedGammaNum.toFixed(1)} Interval
                           </span>
                         )}
                       </div>
@@ -1078,74 +1078,85 @@ export default function StagingDashboard() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/60 font-mono text-[11px]">
-                        {liveScenarioBenchRows
-                          ? liveScenarioBenchRows.map((row) => (
-                              <tr
-                                key={row.key}
-                                className={`hover:bg-slate-800/30 ${
-                                  row.key.startsWith("sage_full")
-                                    ? "bg-indigo-950/30 border-t border-indigo-500/40"
-                                    : row.key === "lightgbm_quantile"
-                                    ? "bg-emerald-950/15"
-                                    : ""
-                                }`}
-                              >
-                                <td className="py-2.5 px-3 font-semibold text-white">
-                                  {row.name}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-300 font-sans text-xs">
-                                  {row.calibrator}
-                                </td>
-                                <td className="py-2.5 px-3 text-emerald-400 font-bold">
-                                  {row.picp !== null
-                                    ? `${(row.picp * 100).toFixed(1)}%`
-                                    : "N/A"}
-                                </td>
-                                <td className="py-2.5 px-3 text-indigo-300">
-                                  {row.published_picp !== null
-                                    ? `${(row.published_picp * 100).toFixed(2)}%`
-                                    : "N/A"}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-200">
-                                  {row.mpiw !== null
-                                    ? `${row.mpiw.toFixed(2)} µg/m³`
-                                    : "N/A"}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-300">
-                                  {row.winkler !== null
-                                    ? row.winkler.toFixed(2)
-                                    : "N/A"}
-                                </td>
-                                <td className="py-2.5 px-3 text-amber-300">
-                                  {(row.abstention * 100).toFixed(2)}%
-                                </td>
-                              </tr>
-                            ))
-                          : BASELINE_BENCHMARKS.map((b) => (
-                              <tr key={b.key} className="hover:bg-slate-800/30">
-                                <td className="py-2.5 px-3 font-semibold text-white">
-                                  {b.name}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-300 font-sans text-xs">
-                                  {b.calibrator}
-                                </td>
-                                <td className="py-2.5 px-3 text-emerald-400 font-bold">
-                                  {b.coverage}
-                                </td>
-                                <td className="py-2.5 px-3 text-indigo-300">
-                                  {b.published_coverage}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-200">
-                                  {b.width}
-                                </td>
-                                <td className="py-2.5 px-3 text-slate-300">
-                                  {b.winkler}
-                                </td>
-                                <td className="py-2.5 px-3 text-amber-300">
-                                  {b.abstention}
-                                </td>
-                              </tr>
-                            ))}
+                        {liveScenarioBenchRows ? (
+                          liveScenarioBenchRows.map((row) => (
+                            <tr
+                              key={row.key}
+                              className={`hover:bg-slate-800/30 ${
+                                row.key.startsWith("sage_full")
+                                  ? "bg-indigo-950/30 border-t border-indigo-500/40"
+                                  : row.key === "lightgbm_quantile"
+                                  ? "bg-emerald-950/15"
+                                  : ""
+                              }`}
+                            >
+                              <td className="py-2.5 px-3 font-semibold text-white">
+                                {row.name}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-300 font-sans text-xs">
+                                {row.calibrator}
+                              </td>
+                              <td className="py-2.5 px-3 text-emerald-400 font-bold">
+                                {row.picp !== null
+                                  ? `${(row.picp * 100).toFixed(1)}%`
+                                  : "N/A"}
+                              </td>
+                              <td className="py-2.5 px-3 text-indigo-300">
+                                {row.published_picp !== null
+                                  ? `${(row.published_picp * 100).toFixed(2)}%`
+                                  : "N/A"}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-200">
+                                {row.mpiw !== null
+                                  ? `${row.mpiw.toFixed(2)} µg/m³`
+                                  : "N/A"}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-300">
+                                {row.winkler !== null
+                                  ? row.winkler.toFixed(2)
+                                  : "N/A"}
+                              </td>
+                              <td className="py-2.5 px-3 text-amber-300">
+                                {(row.abstention * 100).toFixed(2)}%
+                              </td>
+                            </tr>
+                          ))
+                        ) : isDemoMode ? (
+                          BASELINE_BENCHMARKS.map((b) => (
+                            <tr key={b.key} className="hover:bg-slate-800/30">
+                              <td className="py-2.5 px-3 font-semibold text-white">
+                                {b.name}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-300 font-sans text-xs">
+                                {b.calibrator}
+                              </td>
+                              <td className="py-2.5 px-3 text-emerald-400 font-bold">
+                                {b.coverage}
+                              </td>
+                              <td className="py-2.5 px-3 text-indigo-300">
+                                {b.published_coverage}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-200">
+                                {b.width}
+                              </td>
+                              <td className="py-2.5 px-3 text-slate-300">
+                                {b.winkler}
+                              </td>
+                              <td className="py-2.5 px-3 text-amber-300">
+                                {b.abstention}
+                              </td>
+                            </tr>
+                          ))
+                        ) : (
+                          <tr>
+                            <td
+                              colSpan={7}
+                              className="py-6 px-3 text-center text-slate-400 font-sans"
+                            >
+                              Live experiment detail unavailable from backend API (no static fixture substitution in live mode).
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -1207,7 +1218,7 @@ export default function StagingDashboard() {
                       Honest Scientific Interpretation & Calibration Limits
                     </div>
                     <p className="text-slate-400">
-                      Conformalized Quantile Regression (LightGBM + CQR: 11.35 µg/m³) and Persistence (2.00 µg/m³) deliver tighter intervals than SAGE (17.01 µg/m³) during exchangeable natural intervals. SAGE specifically targets MNAR robustness via sensitivity bounding and selective abstention when D_sensitivity exceeds 8.0 µg/m³ or sensor age exceeds 12h.
+                      Under natural Q1 2024 conditions, Persistence (2.00 µg/m³) and LightGBM + CQR (11.35 µg/m³) produce sharper intervals and better Winkler scores than SAGE (17.01 µg/m³ overall). No formal MNAR coverage guarantee is claimed; stale-history intervals (age &gt; 12h) are explicitly withheld by the safety guard rather than delivered as published forecasts.
                     </p>
                   </div>
                 </div>
@@ -1221,7 +1232,11 @@ export default function StagingDashboard() {
                   SAGE Scientific Methodology
                 </h2>
                 <p>
-                  Sensitivity-Aware Guarded Estimation (SAGE) bounds uncertainty for environmental sensor networks when missingness may depend on unobserved PM2.5 concentrations (MNAR). Universal distribution-free coverage is NOT claimed under unrestricted MNAR; bounds depend on declared sensitivity parameters Γ.
+                  Sensitivity-Aware Guarded Estimation (SAGE) bounds empirical uncertainty for environmental sensor networks when missingness may depend on unobserved PM2.5 concentrations (MNAR). No unconditional or distribution-free coverage guarantee is claimed under unrestricted MNAR; bounds are heuristic sensitivity envelopes parameterized by an analyst-imposed logit sensitivity coefficient γ in{" "}
+                  <code className="text-indigo-300 font-mono">
+                    logit P(R=1 | X,Y) = g(X) + γ(Y - μ)/σ
+                  </code>{" "}
+                  (distinct from Rosenbaum&apos;s odds-ratio Γ).
                 </p>
                 <div className="space-y-2">
                   <h3 className="font-semibold text-white text-sm">
@@ -1237,9 +1252,9 @@ export default function StagingDashboard() {
                     </li>
                     <li>
                       <strong>Sensitivity Disagreement (D_sensitivity):</strong>{" "}
-                      Spread across upper bounds under hypothesized sensitivity shifts:{" "}
+                      Spread across upper bounds under hypothesized logit sensitivity shifts:{" "}
                       <code className="text-indigo-300 font-mono">
-                        max_Γ U_Γ − min_Γ U_Γ
+                        max_γ U_γ − min_γ U_γ
                       </code>{" "}
                       (harmonized abstention threshold τ_disagree = 8.0 µg/m³).
                     </li>
@@ -1252,7 +1267,7 @@ export default function StagingDashboard() {
                       (ceiling τ_envelope = 50.0 µg/m³).
                     </li>
                     <li>
-                      <strong>Guarded Abstention:</strong> Explicitly withholds forecast publication if scenario disagreement exceeds 8.0 µg/m³, envelope width exceeds 50.0 µg/m³, sensor observation age exceeds 12 hours, or cold-start history is absent.
+                      <strong>Guarded Abstention:</strong> Explicitly withholds forecast publication if scenario disagreement exceeds 8.0 µg/m³, envelope width exceeds 50.0 µg/m³, Kish ESS drops below 15, sensor observation age exceeds 12 hours, or cold-start history is absent. Note: in archived Q1 2024 UK AURN tests with D_sensitivity ≈ 3.32 µg/m³, active abstentions were triggered by stale sensor age (&gt;12h) rather than disagreement.
                     </li>
                   </ul>
                 </div>

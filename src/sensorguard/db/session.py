@@ -28,12 +28,18 @@ def get_database_url() -> str:
 
 
 def create_db_engine(url: str | None = None, echo: bool = False) -> Engine:
-    """Create a configured SQLAlchemy engine."""
+    """Create a configured SQLAlchemy engine for SQLite or PostgreSQL."""
     db_url = url or get_database_url()
-    connect_args = {}
     if db_url.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
-    return create_engine(db_url, echo=echo, connect_args=connect_args)
+        return create_engine(db_url, echo=echo, connect_args={"check_same_thread": False})
+    return create_engine(
+        db_url,
+        echo=echo,
+        pool_size=20,
+        max_overflow=10,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+    )
 
 
 def get_session_factory(engine: Engine | None = None) -> sessionmaker[Session]:
