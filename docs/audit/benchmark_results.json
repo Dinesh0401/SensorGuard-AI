@@ -1,5 +1,5 @@
 {
-  "benchmark_id": "SG-BENCH-20261123-143606",
+  "benchmark_id": "SG-BENCH-20261124-162502",
   "dataset_hash": "7e8f2d316bee0c4f",
   "nominal_coverage": 0.9,
   "n_train": 8884,
@@ -617,16 +617,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2715,
+          "n_abstained": 12,
+          "abstention_rate": 0.0044,
           "mae": 0.2806,
           "rmse": 0.7984,
           "picp": 0.9993,
           "overall_picp": 0.9993,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9993,
+          "published_mae": 0.2754,
+          "published_mpiw": 17.0034,
           "coverage_gap": 0.0993,
           "mpiw": 17.0093,
           "winkler_score": 17.0617,
@@ -767,16 +767,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2715,
+          "n_abstained": 12,
+          "abstention_rate": 0.0044,
           "mae": 0.2806,
           "rmse": 0.7984,
           "picp": 0.9985,
           "overall_picp": 0.9985,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9985,
+          "published_mae": 0.2754,
+          "published_mpiw": 13.2204,
           "coverage_gap": 0.0985,
           "mpiw": 13.2257,
           "winkler_score": 13.3467,
@@ -1444,16 +1444,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2711,
+          "n_abstained": 16,
+          "abstention_rate": 0.0059,
           "mae": 0.3245,
           "rmse": 0.8224,
           "picp": 0.9993,
           "overall_picp": 0.9993,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9993,
+          "published_mae": 0.3181,
+          "published_mpiw": 17.0022,
           "coverage_gap": 0.0993,
           "mpiw": 17.0098,
           "winkler_score": 17.0621,
@@ -1594,16 +1594,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2711,
+          "n_abstained": 16,
+          "abstention_rate": 0.0059,
           "mae": 0.3245,
           "rmse": 0.8224,
           "picp": 0.9985,
           "overall_picp": 0.9985,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9985,
+          "published_mae": 0.3181,
+          "published_mpiw": 13.2219,
           "coverage_gap": 0.0985,
           "mpiw": 13.2289,
           "winkler_score": 13.3499,
@@ -2271,16 +2271,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2701,
+          "n_abstained": 26,
+          "abstention_rate": 0.0095,
           "mae": 0.3603,
           "rmse": 1.0014,
           "picp": 0.9985,
           "overall_picp": 0.9985,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9996,
+          "published_mae": 0.3276,
+          "published_mpiw": 16.9589,
           "coverage_gap": 0.0985,
           "mpiw": 16.9846,
           "winkler_score": 17.0965,
@@ -2421,16 +2421,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2701,
+          "n_abstained": 26,
+          "abstention_rate": 0.0095,
           "mae": 0.3603,
           "rmse": 1.0014,
           "picp": 0.9978,
           "overall_picp": 0.9978,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9993,
+          "published_mae": 0.3276,
+          "published_mpiw": 13.2049,
           "coverage_gap": 0.0978,
           "mpiw": 13.2188,
           "winkler_score": 13.4547,
@@ -3098,16 +3098,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2702,
+          "n_abstained": 25,
+          "abstention_rate": 0.0092,
           "mae": 0.2831,
           "rmse": 0.7998,
           "picp": 0.9993,
           "overall_picp": 0.9993,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9993,
+          "published_mae": 0.2775,
+          "published_mpiw": 17.0087,
           "coverage_gap": 0.0993,
           "mpiw": 17.0098,
           "winkler_score": 17.0622,
@@ -3248,16 +3248,16 @@
           "n_valid_eval": 2727,
           "n_service_failures": 0,
           "n_samples": 2727,
-          "n_published": 0,
-          "n_abstained": 2727,
-          "abstention_rate": 1.0,
+          "n_published": 2702,
+          "n_abstained": 25,
+          "abstention_rate": 0.0092,
           "mae": 0.2831,
           "rmse": 0.7998,
           "picp": 0.9985,
           "overall_picp": 0.9985,
-          "published_picp": null,
-          "published_mae": null,
-          "published_mpiw": null,
+          "published_picp": 0.9985,
+          "published_mae": 0.2775,
+          "published_mpiw": 13.2238,
           "coverage_gap": 0.0985,
           "mpiw": 13.2264,
           "winkler_score": 13.3474,
@@ -3333,10 +3333,10 @@
       },
       "sage_full": {
         "picp": 1.0,
-        "published_picp": null,
+        "published_picp": 1.0,
         "mpiw": 16.7781,
         "winkler_score": 16.7781,
-        "abstention_rate": 1.0
+        "abstention_rate": 0.0048
       }
     },
     "block_2_2024-03-19_to_2024-03-25": {
@@ -3355,10 +3355,10 @@
       },
       "sage_full": {
         "picp": 0.9986,
-        "published_picp": null,
+        "published_picp": 0.9986,
         "mpiw": 17.3878,
         "winkler_score": 17.454,
-        "abstention_rate": 1.0
+        "abstention_rate": 0.0095
       }
     },
     "block_3_2024-03-25_to_2024-03-31": {
@@ -3377,10 +3377,10 @@
       },
       "sage_full": {
         "picp": 0.999,
-        "published_picp": null,
+        "published_picp": 0.999,
         "mpiw": 16.9697,
         "winkler_score": 17.0684,
-        "abstention_rate": 1.0
+        "abstention_rate": 0.0
       }
     }
   },
@@ -3403,10 +3403,10 @@
       "sage_full": {
         "mae": 0.3485,
         "picp": 0.9955,
-        "published_picp": 1.0,
+        "published_picp": 0.9961,
         "mpiw": 8.1833,
         "winkler_score": 8.243,
-        "abstention_rate": 0.824
+        "abstention_rate": 0.0026
       }
     },
     "station_2": {
@@ -3430,7 +3430,7 @@
         "published_picp": 1.0,
         "mpiw": 8.4747,
         "winkler_score": 8.4747,
-        "abstention_rate": 0.9085
+        "abstention_rate": 0.0021
       }
     },
     "station_3": {
@@ -3451,10 +3451,10 @@
       "sage_full": {
         "mae": 0.5345,
         "picp": 0.9753,
-        "published_picp": null,
+        "published_picp": 0.9772,
         "mpiw": 8.3447,
         "winkler_score": 9.291,
-        "abstention_rate": 1.0
+        "abstention_rate": 0.0085
       }
     },
     "station_4": {
@@ -3502,7 +3502,7 @@
         "published_picp": 1.0,
         "mpiw": 8.3591,
         "winkler_score": 8.3591,
-        "abstention_rate": 0.9483
+        "abstention_rate": 0.0021
       }
     },
     "station_6": {
@@ -3523,10 +3523,10 @@
       "sage_full": {
         "mae": 0.3399,
         "picp": 0.9914,
-        "published_picp": 1.0,
+        "published_picp": 0.9914,
         "mpiw": 7.9356,
         "winkler_score": 8.315,
-        "abstention_rate": 0.731
+        "abstention_rate": 0.0021
       }
     },
     "station_7": {
@@ -3571,10 +3571,10 @@
       "sage_full": {
         "mae": 0.4101,
         "picp": 0.9904,
-        "published_picp": 1.0,
+        "published_picp": 0.9909,
         "mpiw": 8.4195,
         "winkler_score": 9.3343,
-        "abstention_rate": 0.9898
+        "abstention_rate": 0.0027
       }
     }
   }
