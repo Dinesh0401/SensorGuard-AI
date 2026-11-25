@@ -4,7 +4,7 @@
 **Dataset Lineage Hash:** `33805c42097fc86e`  
 **Random Seeds:** `[11, 42, 107]` (3 runs per cell)  
 **Nominal Coverage Target:** `90%`  
-**Evaluation Window:** Q1 2024 UK AURN Pilot Network (London Urban Ingestion)  
+**Evaluation Window:** Q1 2024 UK AURN Pilot Network (8 Stations across Greater London & regional England)  
 
 ---
 

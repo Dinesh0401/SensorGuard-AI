@@ -2,8 +2,8 @@
 **Milestone 5.2 Algorithmic Correction and Empirical Evaluation**
 
 - **Author:** Senior ML Research Engineer, Statistical Evaluation Reviewer
-- **Target Algorithms:** SAGE (Sensitivity-Aware Guarded Ensemble), CQR (Conformalized Quantile Regression), Split Conformal Baselines
-- **Dataset:** UK AURN London Urban Air Quality Network (Q1 2024 Pilot, 8 Stations, $N_{\text{test}} = 3,496$, $N_{\text{valid}} = 2,727$)
+- **Target Algorithms:** SAGE (Sensitivity-Aware Guarded Estimation), CQR (Conformalized Quantile Regression), Split Conformal Baselines
+- **Dataset:** UK AURN Pilot Network (Q1 2024, `2024-01-01` – `2024-03-31`, 8 Stations across Greater London & regional England, $N_{\text{test}} = 3,496$ grid rows, $N_{\text{valid}} = 2,727$)
 - **Audit Date:** November 25, 2026
 
 ---
@@ -13,11 +13,11 @@
 In Milestone 5.1, an evaluation defect caused SAGE to report 100% abstention across natural and missingness benchmark scenarios. This was caused by conflating the **total prediction interval envelope width** with **sensitivity scenario disagreement**.
 
 ### Mathematical Formulation
-Let $\gamma \in \Gamma$ index the missingness sensitivity scenarios evaluated by SAGE (e.g., $\gamma \in \{0.0, 0.5, 1.0, 1.5, 2.0\}$ representing odds ratios of missingness-not-at-random mechanisms), with corresponding upper and lower conformal bounds $[L_\gamma, U_\gamma]$.
+Let $\gamma \in \{0.0, 0.5, 1.0, 1.5, 2.0\}$ index the parametric logit sensitivity shifts in $\text{logit}\,\pi_\gamma(X, Y) = g(X) + \gamma (Y - \mu_y)/\sigma_y$ (distinct from Rosenbaum's pairwise odds-ratio $\Gamma$), with corresponding calibrated bounds $[L_\gamma, U_\gamma]$:
 
 1. **Total Conservative Envelope Width ($W_{\text{envelope}}$):**
-   $$W_{\text{envelope}} = U_{\max} - L_{\min} = \max_{\gamma \in \Gamma} U_\gamma - \min_{\gamma \in \Gamma} L_\gamma$$
-   This represents the absolute span between the most conservative upper bound and the most conservative lower bound. Because the point forecast error residuals on PM2.5 in London have a substantial dynamic range, $W_{\text{envelope}}$ averages **$17.01 \ \mu\text{g/m}^3$**.
+   $$W_{\text{envelope}} = U_{\max} - L_{\min} = \max_\gamma U_\gamma - \min_\gamma L_\gamma$$
+   This represents the absolute span between the widest upper and lower scenario bounds across the Q1 2024 network, averaging **$17.01 \ \mu\text{g/m}^3$**.
 
 2. **Sensitivity Scenario Disagreement ($D_{\text{sensitivity}}$):**
    $$D_{\text{sensitivity}} = \max_{\gamma \in \Gamma} U_\gamma - \min_{\gamma \in \Gamma} U_\gamma = q_{\max} - q_{\min}$$
@@ -38,9 +38,9 @@ W_{\text{envelope}} > \tau_{\text{envelope}} & (\tau_{\text{envelope}} = 50.0 \ 
 
 ---
 
-## 2. Empirical Benchmark Results (Q1 2024 London AURN)
+## 2. Empirical Benchmark Results (Q1 2024 UK AURN Pilot Network)
 
-With the corrected formulation and harmonized thresholds ($\tau_{\text{disagree}} = 8.0$, $\tau_{\text{envelope}} = 50.0$), the benchmark was rerun across all four test regimes from [benchmark_results.json](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/audit/benchmark_results.json):
+With the corrected formulation and harmonized thresholds ($\tau_{\text{disagree}} = 8.0$, $\tau_{\text{envelope}} = 50.0$), the benchmark was rerun across all four test regimes from [benchmark_results.json](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/audit/benchmark_results.json) (seed=42; note that active abstentions `12`, `16`, `26`, `25` match the `age_hours > 12.0` stale-history subset in both CQR and SAGE since $D_{\text{sensitivity}} = 3.32 < 8.0$):
 
 | Scenario | Model Configuration | Total Samples | Published | Abstained | Abstention Rate | Overall PICP | Published PICP | Mean Width (MPIW) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |

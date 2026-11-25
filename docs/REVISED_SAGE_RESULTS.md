@@ -1,5 +1,8 @@
 # SensorGuard AI — Revised SAGE Empirical Results & Baseline Comparison
 
+> [!NOTE]
+> **Historical Milestone 4.1 Record:** Superseded by Milestone 5.2–6.1 ([`docs/RESEARCH_REPORT.md`](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/docs/RESEARCH_REPORT.md)), where `scenario_disagreement` was disentangled from `envelope_width` (replacing the earlier 12.5% abstention artifact from Study ID `SG-SAGE-ABLATION-20261123-135913`) and the 8-station network was accurately scoped as the Q1 2024 UK AURN Pilot Network across Greater London and regional England.
+
 **Study ID:** `SG-SAGE-ABLATION-20261123-135913`  
 **Dataset Lineage Hash:** `33805c42097fc86e` (SHA-256 Content Fingerprint)  
 **Evaluation Window:** Q1 2024 UK AURN London Pilot Network (8 Monitoring Stations, 14,556 Observations)  
