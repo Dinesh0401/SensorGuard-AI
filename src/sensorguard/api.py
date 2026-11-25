@@ -34,10 +34,17 @@ import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
-from sensorguard.db.schema import Observation, Sensor, Station
+from sensorguard.db.schema import (
+    Observation,
+    PilotControlState,
+    PilotIngestAuditRun,
+    Sensor,
+    Station,
+)
 from sensorguard.db.session import create_db_engine, get_session_factory
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.models.data import (
@@ -45,7 +52,13 @@ from sensorguard.models.data import (
     load_pilot_dataset_from_db,
 )
 from sensorguard.models.manifest import ModelManifest
+from sensorguard.models.registry import ALLOWED_DATA_MODES, load_model_registry
 from sensorguard.models.sage import SAGEForecaster
+from sensorguard.pilot_monitor import (
+    DEFAULT_CONTROL_NAME,
+    DurablePilotQuotaTracker,
+    inspect_station_provider_metadata,
+)
 from sensorguard.schemas import (
     AdminEvaluateRequest,
     AdminEvaluateResponse,
@@ -59,13 +72,16 @@ from sensorguard.schemas import (
     HealthResponse,
     ModelStatusResponse,
     ObservationRecord,
+    PilotReadinessResponse,
     ReadinessResponse,
+    ShadowModelSummary,
     StationForecastsResponse,
     StationListResponse,
     StationObservationsResponse,
     StationReliabilityResponse,
     StationSummary,
 )
+from sensorguard.shadow_eval import reconcile_shadow_evaluation
 from sensorguard.simulation import OutageConfig
 
 logger = logging.getLogger(__name__)
@@ -461,6 +477,23 @@ def health_ready(db: Session = Depends(get_db)) -> ReadinessResponse:
     )
 
 
+def _shadow_summaries_from_registry(registry: dict[str, Any]) -> list[ShadowModelSummary]:
+    """Extract non-primary shadow candidates and baselines from the governance registry."""
+    return [
+        ShadowModelSummary(
+            model_id=str(m["model_id"]),
+            version=str(m["version"]),
+            model_class=str(m["model_class"]),
+            algorithm=str(m["algorithm"]),
+            serving_role=str(m["serving_role"]),
+            promoted_to_primary=bool(m.get("promoted_to_primary", False)),
+            promotion_status_note=str(m.get("promotion_status_note", "")),
+        )
+        for m in registry.get("models", [])
+        if m.get("serving_role") != "primary_serving"
+    ]
+
+
 @app.get("/api/v1/model/status", response_model=ModelStatusResponse, tags=["Model"])
 def get_model_status() -> ModelStatusResponse:
     """Return model governance metadata, SHA-256 verification status, and configuration from manifest.json."""
@@ -481,6 +514,7 @@ def get_model_status() -> ModelStatusResponse:
 
     artifact_exists = MODEL_PATH.exists()
     verified = manifest.verify_file(MODEL_PATH) if artifact_exists else False
+    registry = load_model_registry()
 
     return ModelStatusResponse(
         model_id=manifest.model_id,
@@ -493,7 +527,120 @@ def get_model_status() -> ModelStatusResponse:
         verified=verified,
         model_path=str(MODEL_PATH),
         artifact_exists=artifact_exists,
+        model_class=str(registry.get("primary_model_class", "SAGEForecaster")),
+        serving_role="primary_serving",
+        serving_policy=str(registry.get("serving_policy", "")),
+        shadow_models=_shadow_summaries_from_registry(registry),
+        operational_data_mode="archived_historical",
         extra=manifest.extra,
+    )
+
+
+@app.get("/api/v1/pilot/readiness", response_model=PilotReadinessResponse, tags=["Pilot"])
+def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse:
+    """Return Milestone 8 pilot readiness, fail-closed control state, quota, and shadow summary."""
+    now = datetime.now(UTC)
+    registry = load_model_registry()
+    shadow_models = _shadow_summaries_from_registry(registry)
+    station_audit = inspect_station_provider_metadata(
+        db,
+        reference_time=now,
+        recent_threshold_hours=48.0,
+    )
+
+    env_kill = os.getenv("SENSORGUARD_POLLING_KILL_SWITCH", "false").lower() in {"1", "true", "yes"}
+    kill_switch_active = True
+    opt_in_enabled = False
+    control_source = "env_kill_switch" if env_kill else "fail_closed_default"
+    control_reason = (
+        "Environment SENSORGUARD_POLLING_KILL_SWITCH active."
+        if env_kill
+        else "Fail-closed default pending operator approval and schema migration 006."
+    )
+
+    try:
+        ctrl = db.scalars(
+            select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
+        ).first()
+        if ctrl is not None:
+            kill_switch_active = bool(env_kill or ctrl.kill_switch_active)
+            opt_in_enabled = bool((not env_kill) and (not ctrl.kill_switch_active) and ctrl.opt_in_enabled)
+            control_source = "env_kill_switch" if env_kill else "database_006"
+            control_reason = control_reason if env_kill else str(ctrl.reason or "Configured in database.")
+        elif not env_kill:
+            control_source = "database_006_unset_fail_closed"
+            control_reason = "No PilotControlState unlock record; polling remains locked."
+    except SQLAlchemyError:
+        db.rollback()
+
+    max_req = 48
+    used_req, rem_req = 0, max_req
+    try:
+        used_req, rem_req = DurablePilotQuotaTracker(
+            provider="openaq",
+            max_requests_per_day=max_req,
+        ).get_usage(db, now_utc=now)
+    except SQLAlchemyError:
+        db.rollback()
+
+    recent_audits: list[dict[str, Any]] = []
+    try:
+        audit_rows = list(
+            db.scalars(
+                select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id)).limit(5)
+            ).all()
+        )
+        recent_audits = [
+            {
+                "id": row.id,
+                "worker_id": row.worker_id,
+                "status": row.status,
+                "started_at": _ensure_utc(row.started_at).isoformat() if row.started_at else None,
+                "requests_consumed": row.requests_consumed,
+                "records_inserted": row.records_inserted,
+                "records_revised": row.records_revised,
+                "error_summary": row.error_summary,
+            }
+            for row in audit_rows
+        ]
+    except SQLAlchemyError:
+        db.rollback()
+
+    try:
+        shadow_summary = reconcile_shadow_evaluation(db, min_matched_outcomes=100)
+    except SQLAlchemyError:
+        db.rollback()
+        shadow_summary = {
+            "status": "SCHEMA_006_NOT_APPLIED_OFFLINE",
+            "calibration_claim_eligible": False,
+            "min_matched_outcomes_required": 100,
+            "models": {},
+        }
+
+    if opt_in_enabled and not kill_switch_active:
+        op_mode = "shadow_live"
+    else:
+        op_mode = "archived_historical"
+
+    return PilotReadinessResponse(
+        operational_data_mode=op_mode,
+        allowed_data_modes=list(ALLOWED_DATA_MODES),
+        primary_model_id=str(registry.get("primary_model_id", "sage_pilot_q1_2024")),
+        primary_model_class=str(registry.get("primary_model_class", "SAGEForecaster")),
+        adaptive_sage_promoted=bool(registry.get("adaptive_sage_promoted", False)),
+        serving_policy=str(registry.get("serving_policy", "")),
+        shadow_models=shadow_models,
+        kill_switch_active=kill_switch_active,
+        opt_in_enabled=opt_in_enabled,
+        control_source=control_source,
+        control_reason=control_reason,
+        requests_used_today=used_req,
+        requests_remaining=rem_req,
+        max_requests_per_day=max_req,
+        recent_audit_runs=recent_audits,
+        station_metadata_audit=station_audit,
+        shadow_evaluation_summary=shadow_summary,
+        checked_at=now,
     )
 
 
@@ -780,7 +927,16 @@ def _compute_station_forecasts_sync(
     timestamps = st_df["timestamp"].tolist()
     age_hours_list = st_df["age_hours"].tolist()
     sorted_gammas = sorted(res.gamma_intervals.keys())
-    model_ver = f"SAGE-{model.config.base_model_type.upper()}-v1"
+    model_cls_name = type(model).__name__
+    try:
+        _manifest = ModelManifest.load(MANIFEST_PATH) if MANIFEST_PATH.exists() else None
+    except Exception:  # noqa: BLE001
+        _manifest = None
+    model_ver = (
+        f"{_manifest.model_id}@{_manifest.version} ({model_cls_name})"
+        if _manifest is not None
+        else f"sage_pilot_q1_2024@1.0.0 ({model_cls_name})"
+    )
     nom_cov = model.config.nominal_coverage
 
     for idx in range(len(st_df)):

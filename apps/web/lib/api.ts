@@ -163,6 +163,16 @@ export interface ExperimentDetailResponse {
   research_caveats: string[];
 }
 
+export interface ShadowModelSummary {
+  model_id: string;
+  version: string;
+  model_class: string;
+  algorithm: string;
+  serving_role: string;
+  promoted_to_primary: boolean;
+  promotion_status_note: string;
+}
+
 export interface ModelStatusResponse {
   model_id: string;
   version: string;
@@ -174,7 +184,53 @@ export interface ModelStatusResponse {
   verified: boolean;
   model_path: string;
   artifact_exists: boolean;
+  model_class?: string;
+  serving_role?: string;
+  serving_policy?: string;
+  shadow_models?: ShadowModelSummary[];
+  operational_data_mode?: string;
   extra?: Record<string, unknown> | null;
+}
+
+export interface PilotReadinessResponse {
+  operational_data_mode: string;
+  allowed_data_modes: string[];
+  primary_model_id: string;
+  primary_model_class: string;
+  adaptive_sage_promoted: boolean;
+  serving_policy: string;
+  shadow_models: ShadowModelSummary[];
+  kill_switch_active: boolean;
+  opt_in_enabled: boolean;
+  control_source: string;
+  control_reason: string;
+  requests_used_today: number;
+  requests_remaining: number;
+  max_requests_per_day: number;
+  recent_audit_runs: Array<Record<string, unknown>>;
+  station_metadata_audit: {
+    reference_time: string;
+    total_stations: number;
+    recently_active_at_snapshot: number;
+    stale_at_snapshot: number;
+    stations: Array<{
+      station_id: number;
+      station_name: string;
+      provider_location_id: number;
+      upstream_provider: string;
+      licenses: string[];
+      metadata_last_utc: string | null;
+      was_active_at_fetch_snapshot: boolean;
+      current_live_status: string;
+    }>;
+  };
+  shadow_evaluation_summary: {
+    status: string;
+    calibration_claim_eligible: boolean;
+    min_matched_outcomes_required: number;
+    models: Record<string, Record<string, unknown>>;
+  };
+  checked_at: string;
 }
 
 export class ApiError extends Error {
@@ -236,6 +292,13 @@ export const api = {
     ),
   getModelStatus: () =>
     fetchJson<ModelStatusResponse>("/api/v1/model/status").catch(() => null),
+  getPilotReadiness: () =>
+    fetchJson<PilotReadinessResponse>("/api/v1/pilot/readiness").catch(() => null),
   getHealth: () =>
-    fetchJson<{ status: string; data_mode?: string }>("/health"),
+    fetchJson<{
+      status: string;
+      data_mode?: string;
+      operational_data_mode?: string;
+      allowed_data_modes?: string[];
+    }>("/health"),
 };

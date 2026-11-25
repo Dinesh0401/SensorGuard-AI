@@ -13,15 +13,24 @@ from sensorguard.db.schema import (
     ForecastRecord,
     ForecastRun,
     Observation,
+    PilotControlState,
+    PilotIngestAuditRun,
+    PilotPollLease,
+    PilotQuotaState,
     RawIngestBatch,
     Sensor,
     Station,
 )
 from sensorguard.pilot_monitor import (
     BoundedPilotConfig,
+    DurablePilotQuotaTracker,
     PilotQuotaTracker,
+    acquire_poll_lease,
+    inspect_station_provider_metadata,
     reconcile_delayed_ground_truth,
+    release_poll_lease,
     run_bounded_opt_in_poll,
+    set_polling_kill_switch,
 )
 
 
@@ -211,3 +220,354 @@ def test_delayed_ground_truth_reconciliation_isolates_missing_labels(tmp_path):
         assert report["abstained_matched_count"] == 1
         assert report["mnar_censoring_warning"] is True
     engine.dispose()
+
+
+def test_durable_quota_across_restarts_and_worker_concurrency(tmp_path) -> None:
+    """Verify DurablePilotQuotaTracker persists across engine restarts and prevents concurrent overshoot."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from sqlalchemy import create_engine, event
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import Base
+    from sensorguard.pilot_monitor import DurablePilotQuotaTracker
+
+    db_file = tmp_path / "durable_quota.db"
+    db_url = f"sqlite:///{db_file}"
+
+    def _make_engine():
+        eng = create_engine(
+            db_url,
+            connect_args={"check_same_thread": False, "timeout": 30.0},
+            future=True,
+        )
+
+        @event.listens_for(eng, "connect")
+        def _set_wal(dbapi_conn, _conn_record):
+            cursor = dbapi_conn.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.close()
+
+        return eng
+
+    eng1 = _make_engine()
+    Base.metadata.create_all(eng1)
+    sf1 = sessionmaker(bind=eng1, autoflush=False, autocommit=False)
+    t0 = datetime(2026, 11, 25, 10, 0, tzinfo=UTC)
+
+    tracker1 = DurablePilotQuotaTracker(provider="openaq", max_requests_per_day=3)
+    with sf1() as sess:
+        assert tracker1.get_usage(sess, now_utc=t0) == (0, 3)
+        assert tracker1.try_consume(sess, count=1, now_utc=t0) is True
+        assert tracker1.get_usage(sess, now_utc=t0) == (1, 2)
+    eng1.dispose()
+
+    # Simulate process restart with brand-new engine and concurrent worker sessions
+    eng2 = _make_engine()
+    sf2 = sessionmaker(bind=eng2, autoflush=False, autocommit=False)
+    tracker2 = DurablePilotQuotaTracker(provider="openaq", max_requests_per_day=3)
+
+    with sf2() as sess:
+        assert tracker2.get_usage(sess, now_utc=t0) == (1, 2)
+
+    def _worker_consume(_worker_idx: int) -> bool:
+        worker_tracker = DurablePilotQuotaTracker(provider="openaq", max_requests_per_day=3)
+        with sf2() as worker_sess:
+            return worker_tracker.try_consume(worker_sess, count=1, now_utc=t0)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        outcomes = list(pool.map(_worker_consume, range(5)))
+
+    assert outcomes.count(True) == 2
+    assert outcomes.count(False) == 3
+
+    with sf2() as sess:
+        assert tracker2.get_usage(sess, now_utc=t0) == (3, 0)
+        assert tracker2.try_consume(sess, count=1, now_utc=t0) is False
+        # Rollover to next UTC day restores fresh daily quota
+        next_day = t0 + timedelta(days=1)
+        assert tracker2.get_usage(sess, now_utc=next_day) == (0, 3)
+    eng2.dispose()
+
+
+def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path, monkeypatch) -> None:
+    """Verify DB/env kill switches, lease TTL recovery, HTTP 429 handling, and append-only revisions."""
+    import json
+
+    from sqlalchemy import create_engine, desc, select
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import (
+        Base,
+        Observation,
+        PilotIngestAuditRun,
+        Sensor,
+        Station,
+    )
+    from sensorguard.pilot_monitor import (
+        BoundedPilotConfig,
+        acquire_poll_lease,
+        ensure_default_control_state,
+        run_bounded_opt_in_poll,
+        set_polling_kill_switch,
+    )
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'lease_audit.db'}", future=True)
+    Base.metadata.create_all(eng)
+    sf = sessionmaker(bind=eng, autoflush=False, autocommit=False)
+
+    now = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    h1 = now - timedelta(hours=2)
+    h2 = now - timedelta(hours=1)
+
+    with sf() as sess:
+        st = Station(
+            provider="openaq",
+            provider_location_id=154,
+            name="Westminster - Marylebone Road",
+            country="GB",
+            latitude=51.5225,
+            longitude=-0.1546,
+            metadata_json=json.dumps(
+                {
+                    "provider": {"name": "London Air Quality Network"},
+                    "licenses": [{"name": "UK OGL"}],
+                }
+            ),
+            updated_at=now,
+        )
+        sess.add(st)
+        sess.flush()
+        sess.add(
+            Sensor(
+                station_id=st.id,
+                provider_sensor_id=246,
+                parameter="pm25",
+                canonical_unit="µg/m³",
+            )
+        )
+        ctrl = ensure_default_control_state(sess, now_utc=now)
+        assert ctrl.kill_switch_active is True
+        assert ctrl.opt_in_enabled is False
+        sess.commit()
+
+    # 1. Fail-closed DB kill switch blocks poll even when config.opt_in_enabled=True
+    def _ok_transport(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP transport must not execute while kill-switch is active")
+
+    cfg = BoundedPilotConfig(
+        opt_in_enabled=True,
+        allowed_location_ids=(154,),
+        lookback_hours=24,
+        max_requests_per_day=10,
+        lease_ttl_seconds=15,
+        worker_id="worker-active",
+        require_db_unlock_for_live=True,
+    )
+    blocked = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(_ok_transport),
+        now_utc=now,
+    )
+    assert blocked["status"] == "SKIPPED_KILL_SWITCH"
+
+    # 2. Unlock DB control, verify environment kill switch still overrides fail-closed
+    with sf() as sess:
+        set_polling_kill_switch(
+            sess,
+            kill_switch_active=False,
+            opt_in_enabled=True,
+            reason="Offline mock transport test unlocked",
+            updated_by="pytest",
+            now_utc=now,
+        )
+    monkeypatch.setenv("SENSORGUARD_POLLING_KILL_SWITCH", "true")
+    env_blocked = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(_ok_transport),
+        now_utc=now,
+    )
+    assert env_blocked["status"] == "SKIPPED_KILL_SWITCH"
+    monkeypatch.delenv("SENSORGUARD_POLLING_KILL_SWITCH", raising=False)
+
+    # 3. Active leader lease blocks competing worker; expired lease recovers automatically
+    with sf() as sess:
+        acquired, recovered = acquire_poll_lease(
+            sess,
+            holder_id="crashed-worker",
+            lease_name=cfg.lease_name,
+            ttl_seconds=15,
+            now_utc=now - timedelta(seconds=5),
+        )
+        assert (acquired, recovered) == (True, False)
+
+    contended = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(_ok_transport),
+        now_utc=now,
+    )
+    assert contended["status"] == "SKIPPED_NO_LEASE"
+
+    # 4. After lease expires (+30s), worker recovers lease and handles HTTP 429 cleanly
+    def _rate_limit_transport(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": "0.01"}, json={"detail": "rate limit"})
+
+    after_ttl = now + timedelta(seconds=30)
+    res_429 = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(_rate_limit_transport),
+        now_utc=after_ttl,
+    )
+    assert res_429["status"] == "HTTP_429_BACKOFF"
+    assert res_429["recovered_from_expired_lease"] is True
+
+    # 5. Bounded historical reconciliation + append-only revision on upstream value update
+    payload_v1 = {
+        "results": [
+            {
+                "value": 12.5,
+                "parameter": {"name": "pm25", "units": "µg/m³"},
+                "period": {
+                    "datetimeFrom": {"utc": (h1 - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                    "datetimeTo": {"utc": h1.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                },
+            },
+            {
+                "value": 15.0,
+                "parameter": {"name": "pm25", "units": "µg/m³"},
+                "period": {
+                    "datetimeFrom": {"utc": h1.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                    "datetimeTo": {"utc": h2.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                },
+            },
+        ]
+    }
+    res_v1 = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=payload_v1)),
+        now_utc=now,
+    )
+    assert res_v1["status"] == "SUCCESS"
+    assert res_v1["records_inserted"] == 2
+    assert res_v1["records_revised"] == 0
+
+    payload_v2 = {
+        "results": [
+            payload_v1["results"][0],  # Unchanged -> deduplicated
+            {
+                **payload_v1["results"][1],
+                "value": 17.5,  # Revised -> append-only version=2
+            },
+        ]
+    }
+    res_v2 = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json=payload_v2)),
+        now_utc=now,
+    )
+    assert res_v2["status"] == "SUCCESS"
+    assert res_v2["records_deduplicated"] == 1
+    assert res_v2["records_revised"] == 1
+
+    with sf() as sess:
+        obs_h2 = list(
+            sess.scalars(
+                select(Observation)
+                .where(Observation.observed_at == h2)
+                .order_by(Observation.version.asc())
+            ).all()
+        )
+        assert [o.version for o in obs_h2] == [1, 2]
+        assert [float(o.value or 0.0) for o in obs_h2] == [15.0, 17.5]
+
+        audits = list(
+            sess.scalars(
+                select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id))
+            ).all()
+        )
+        statuses = {a.status for a in audits}
+        assert {"SKIPPED_KILL_SWITCH", "SKIPPED_NO_LEASE", "HTTP_429_BACKOFF", "SUCCESS"}.issubset(
+            statuses
+        )
+    eng.dispose()
+
+
+def test_inspect_station_provider_metadata_offline(tmp_path) -> None:
+    """Verify station license and snapshot recency audit never calls external HTTP or assumes live state."""
+    import json
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import Base, Sensor, Station
+    from sensorguard.pilot_monitor import inspect_station_provider_metadata
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'meta_audit.db'}", future=True)
+    Base.metadata.create_all(eng)
+    sf = sessionmaker(bind=eng, autoflush=False, autocommit=False)
+    snap_time = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+
+    with sf() as sess:
+        st_recent = Station(
+            provider="openaq",
+            provider_location_id=154,
+            name="Westminster - Marylebone Road",
+            country="GB",
+            latitude=51.52,
+            longitude=-0.15,
+            metadata_json=json.dumps(
+                {
+                    "provider": {"name": "London Air Quality Network"},
+                    "licenses": [{"name": "UK OGL"}],
+                    "datetimeFirst": {"utc": "2016-01-30T01:00:00Z"},
+                    "datetimeLast": {"utc": "2026-11-22T11:00:00Z"},
+                }
+            ),
+            updated_at=snap_time,
+        )
+        st_stale = Station(
+            provider="openaq",
+            provider_location_id=141,
+            name="London Harlington - UKA00472",
+            country="GB",
+            latitude=51.49,
+            longitude=-0.44,
+            metadata_json=json.dumps(
+                {
+                    "provider": {"name": "EEA"},
+                    "licenses": [{"name": "ODC-BY"}],
+                    "datetimeFirst": {"utc": "2016-01-30T01:00:00Z"},
+                    "datetimeLast": {"utc": "2026-05-26T13:00:00Z"},
+                }
+            ),
+            updated_at=snap_time,
+        )
+        sess.add_all([st_recent, st_stale])
+        sess.flush()
+        sess.add_all(
+            [
+                Sensor(station_id=st_recent.id, provider_sensor_id=246, parameter="pm25", canonical_unit="µg/m³"),
+                Sensor(station_id=st_stale.id, provider_sensor_id=261, parameter="pm25", canonical_unit="µg/m³"),
+            ]
+        )
+        sess.commit()
+
+        audit = inspect_station_provider_metadata(sess, reference_time=snap_time, recent_threshold_hours=48.0)
+        assert audit["total_stations"] == 2
+        assert audit["recently_active_at_snapshot"] == 1
+        assert audit["stale_at_snapshot"] == 1
+        by_loc = {item["provider_location_id"]: item for item in audit["stations"]}
+        assert by_loc[154]["licenses"] == ["UK OGL"]
+        assert by_loc[154]["was_active_at_fetch_snapshot"] is True
+        assert by_loc[154]["current_live_status"] == "UNVERIFIED_OFFLINE_MODE"
+        assert by_loc[141]["licenses"] == ["ODC-BY"]
+        assert by_loc[141]["was_active_at_fetch_snapshot"] is False
+        assert by_loc[141]["current_live_status"] == "UNVERIFIED_OFFLINE_MODE"
+    eng.dispose()
+

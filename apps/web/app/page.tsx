@@ -19,6 +19,7 @@ import {
   type ForecastRecord,
   type ModelStatusResponse,
   type ObservationRecord,
+  type PilotReadinessResponse,
   type StationReliabilityResponse,
   type StationSummary,
 } from "../lib/api";
@@ -90,6 +91,7 @@ export default function StagingDashboard() {
   const [ablationDetail, setAblationDetail] =
     useState<ExperimentDetailResponse | null>(null);
   const [modelStatus, setModelStatus] = useState<ModelStatusResponse | null>(null);
+  const [pilotReadiness, setPilotReadiness] = useState<PilotReadinessResponse | null>(null);
 
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [isStationLoading, setIsStationLoading] = useState<boolean>(false);
@@ -140,10 +142,11 @@ export default function StagingDashboard() {
     }
 
     try {
-      const [stRes, expRes, mStatus] = await Promise.all([
+      const [stRes, expRes, mStatus, pReadiness] = await Promise.all([
         api.getStations(),
         api.getExperiments().catch(() => null),
         api.getModelStatus(),
+        api.getPilotReadiness(),
       ]);
 
       setStations(stRes.stations);
@@ -173,6 +176,7 @@ export default function StagingDashboard() {
       }
 
       if (mStatus) setModelStatus(mStatus);
+      if (pReadiness) setPilotReadiness(pReadiness);
       setIsDemoMode(false);
     } catch (err: unknown) {
       const msg =
@@ -376,6 +380,9 @@ export default function StagingDashboard() {
         <div className="flex items-center gap-2.5 flex-wrap">
           <span className="bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/40 text-[11px] font-mono">
             is_archived_pilot=True
+          </span>
+          <span className="bg-sky-500/20 px-2 py-0.5 rounded border border-sky-500/40 text-[11px] font-mono text-sky-200">
+            mode={pilotReadiness?.operational_data_mode ?? modelStatus?.operational_data_mode ?? "archived_historical"} • Active: {modelStatus?.model_class ?? "SAGEForecaster"}
           </span>
           <span
             className={`px-2 py-0.5 rounded border text-[11px] font-mono flex items-center gap-1.5 ${
@@ -1275,6 +1282,94 @@ export default function StagingDashboard() {
             )}
           </>
         )}
+
+        {/* Phase 8 Governance, Serving Versioning & Live Pilot Readiness Panel */}
+        <section
+          aria-label="Milestone 8 Governance and Pilot Readiness"
+          className="mt-6 rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-xs text-slate-300 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+            <div className="flex items-center gap-2 font-semibold text-slate-100">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>Model Serving Governance, Data Operating Modes &amp; Live Pilot Readiness</span>
+            </div>
+            <span className="font-mono text-[11px] px-2 py-0.5 rounded border border-rose-500/40 bg-rose-950/50 text-rose-200">
+              Live Polling: {pilotReadiness?.kill_switch_active !== false ? "LOCKED (Fail-Closed Kill Switch)" : "Shadow Opt-In Active"}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-1.5">
+              <div className="font-semibold text-slate-100">Active Serving vs. Shadow Research</div>
+              <div className="text-slate-300">
+                <span className="text-emerald-300 font-medium">Primary API Model:</span>{" "}
+                <span className="font-mono">{modelStatus?.model_class ?? "SAGEForecaster"}</span>{" "}
+                ({modelStatus?.model_id ?? "sage_pilot_q1_2024"} v{modelStatus?.version ?? "1.0.0"}, Static SAGE).
+                Sensitivity offset is constant across stations/times; intervals expand cautiously up to 12h staleness before abstaining.
+              </div>
+              <div className="text-slate-400">
+                <span className="text-amber-300 font-medium">Shadow Research (Not Served):</span>{" "}
+                <span className="font-mono">AdaptiveSAGEForecaster</span> remains offline/shadow only (unpromoted; M7.7 causal audit did not beat locally weighted MAR).
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-1.5">
+              <div className="font-semibold text-slate-100">Four Explicit Data Modes &amp; Freshness</div>
+              <div className="flex flex-wrap gap-1.5 font-mono text-[10px]">
+                {(pilotReadiness?.allowed_data_modes ?? [
+                  "archived_historical",
+                  "simulated_outage",
+                  "shadow_live",
+                  "validated_live",
+                ]).map((modeName) => {
+                  const activeMode =
+                    pilotReadiness?.operational_data_mode ??
+                    modelStatus?.operational_data_mode ??
+                    "archived_historical";
+                  const isActive = modeName === activeMode;
+                  return (
+                    <span
+                      key={modeName}
+                      className={`px-1.5 py-0.5 rounded border ${
+                        isActive
+                          ? "border-sky-400/60 bg-sky-500/20 text-sky-200 font-semibold"
+                          : "border-slate-700 bg-slate-900 text-slate-400"
+                      }`}
+                    >
+                      {modeName}
+                    </span>
+                  );
+                })}
+              </div>
+              <div className="text-slate-400">
+                Abstention (&gt;12h stale) indicates missing upstream telemetry—not confirmed hardware failure. Prediction intervals require MAR assumptions and are uncalibrated under unrestricted MNAR missingness.
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-3 space-y-1.5">
+              <div className="font-semibold text-slate-100">Offline Pilot Quota &amp; Feed Snapshot</div>
+              <div className="text-slate-300">
+                Daily OpenAQ Cap:{" "}
+                <span className="font-mono">
+                  {pilotReadiness ? `${pilotReadiness.requests_used_today} / ${pilotReadiness.max_requests_per_day}` : "0 / 48"}
+                </span>{" "}
+                requests used • Opt-In:{" "}
+                <span className="font-mono">{pilotReadiness?.opt_in_enabled ? "enabled" : "disabled"}</span>
+              </div>
+              <div className="text-slate-400">
+                Stored 2026-11-22 snapshot: {pilotReadiness?.station_metadata_audit?.recently_active_at_snapshot ?? 2}/
+                {pilotReadiness?.station_metadata_audit?.total_stations ?? 8} UK stations (LAQN OGL) recent; 6/8 EEA (ODC-BY) feeds aged May 2026. Live state unverified in offline mode.
+              </div>
+              <div className="text-slate-400">
+                Shadow calibration gate:{" "}
+                <span className="font-mono">
+                  {pilotReadiness?.shadow_evaluation_summary?.status ?? "INSUFFICIENT_OBSERVED_OUTCOMES"}
+                </span>{" "}
+                (requires &ge;{pilotReadiness?.shadow_evaluation_summary?.min_matched_outcomes_required ?? 100} matched targets).
+              </div>
+            </div>
+          </div>
+        </section>
       </main>
 
       {/* Footer */}
@@ -1285,7 +1380,7 @@ export default function StagingDashboard() {
         <div className="font-mono text-[11px] text-slate-400">
           Model:{" "}
           {modelStatus
-            ? `${modelStatus.algorithm} v${modelStatus.version} • SHA-256 ${
+            ? `${modelStatus.model_class ?? "SAGEForecaster"} (${modelStatus.algorithm} v${modelStatus.version}) • SHA-256 ${
                 modelStatus.verified ? "Verified" : "UNVERIFIED"
               } (${modelStatus.sha256.slice(0, 12)}…)`
             : isDemoMode

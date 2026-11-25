@@ -18,6 +18,22 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="Service status ('ok' or 'degraded')")
     database_connected: bool = Field(..., description="True if database connection check succeeded")
     data_mode: str = Field(..., description="Active dataset mode ('real_pilot' or 'synthetic_only')")
+    operational_data_mode: str = Field(
+        default="archived_historical",
+        description=(
+            "Explicit Phase 8 operational mode: 'archived_historical', 'simulated_outage', "
+            "'shadow_live', or 'validated_live'"
+        ),
+    )
+    allowed_data_modes: list[str] = Field(
+        default_factory=lambda: [
+            "archived_historical",
+            "simulated_outage",
+            "shadow_live",
+            "validated_live",
+        ],
+        description="Explicitly separated SensorGuard data operating modes",
+    )
     stations_count: int = Field(..., description="Number of monitored stations in database")
     observations_count: int = Field(..., description="Total observation count across all sensors")
     timestamp: datetime = Field(..., description="UTC server timestamp")
@@ -30,6 +46,18 @@ class ReadinessResponse(BaseModel):
     database_connected: bool = Field(..., description="True if database connection check succeeded")
     model_loaded: bool = Field(..., description="True if offline model artifact is verified and ready")
     model_version: str = Field(..., description="Loaded model version or 'none'")
+
+
+class ShadowModelSummary(BaseModel):
+    """Shadow-only model entry clearly distinguished from the active primary serving model."""
+
+    model_id: str
+    version: str
+    model_class: str
+    algorithm: str
+    serving_role: str
+    promoted_to_primary: bool
+    promotion_status_note: str
 
 
 class ModelStatusResponse(BaseModel):
@@ -45,6 +73,14 @@ class ModelStatusResponse(BaseModel):
     verified: bool
     model_path: str
     artifact_exists: bool
+    model_class: str = "SAGEForecaster"
+    serving_role: str = "primary_serving"
+    serving_policy: str = (
+        "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). "
+        "AdaptiveSAGEForecaster runs offline/shadow only."
+    )
+    shadow_models: list[ShadowModelSummary] = Field(default_factory=list)
+    operational_data_mode: str = "archived_historical"
     extra: dict[str, Any] | None = None
 
 
@@ -222,3 +258,26 @@ class AdminEvaluateResponse(BaseModel):
     scenario: str
     nominal_coverage: float
     metrics: dict[str, Any]
+
+
+class PilotReadinessResponse(BaseModel):
+    """Comprehensive Milestone 8 pilot readiness, serving separation, quota, and audit status."""
+
+    operational_data_mode: str
+    allowed_data_modes: list[str]
+    primary_model_id: str
+    primary_model_class: str
+    adaptive_sage_promoted: bool
+    serving_policy: str
+    shadow_models: list[ShadowModelSummary]
+    kill_switch_active: bool
+    opt_in_enabled: bool
+    control_source: str
+    control_reason: str
+    requests_used_today: int
+    requests_remaining: int
+    max_requests_per_day: int
+    recent_audit_runs: list[dict[str, Any]]
+    station_metadata_audit: dict[str, Any]
+    shadow_evaluation_summary: dict[str, Any]
+    checked_at: datetime

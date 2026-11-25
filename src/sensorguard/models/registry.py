@@ -1,0 +1,156 @@
+"""Explicit serving and shadow model version registry for SensorGuard AI (Phase 8.0).
+
+Maintains an auditable separation between:
+- The active primary serving artifact (`sage_pilot_q1_2024`, Static SAGEForecaster v1.0.0)
+- Research shadow candidates (`sage_adaptive_q1_2024`, AdaptiveSAGEForecaster) and baselines
+  (`locally_weighted_mar`, `lightgbm_cqr`, `persistence`) evaluated in shadow mode.
+Prevents Static SAGE from ever being labeled or promoted as Adaptive SAGE without meeting
+prespecified verification criteria.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from sensorguard.models.manifest import ModelManifest
+
+DEFAULT_REGISTRY_PATH = Path("artifacts/models/model_registry.json")
+DEFAULT_PRIMARY_MANIFEST = Path("artifacts/models/manifest.json")
+
+ALLOWED_DATA_MODES = (
+    "archived_historical",
+    "simulated_outage",
+    "shadow_live",
+    "validated_live",
+)
+
+
+@dataclass(frozen=True)
+class ModelRegistryEntry:
+    """Versioned model governance entry distinguishing active serving vs shadow candidates."""
+
+    model_id: str
+    version: str
+    model_class: str
+    algorithm: str
+    serving_role: str  # "primary_serving" | "shadow_research" | "shadow_baseline"
+    promoted_to_primary: bool
+    dataset_hash: str
+    nominal_coverage: float
+    artifact_path: str | None
+    sha256: str | None
+    promotion_status_note: str
+
+
+def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, Any]:
+    """Construct canonical registry anchored to the active primary manifest."""
+    if manifest is None and DEFAULT_PRIMARY_MANIFEST.exists():
+        manifest = ModelManifest.load(DEFAULT_PRIMARY_MANIFEST)
+
+    primary_sha = manifest.sha256 if manifest else "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115"
+    primary_id = manifest.model_id if manifest else "sage_pilot_q1_2024"
+    primary_ver = manifest.version if manifest else "1.0.0"
+    dataset_hash = manifest.dataset_hash if manifest else "33805c42097fc86e"
+
+    entries = [
+        ModelRegistryEntry(
+            model_id=primary_id,
+            version=primary_ver,
+            model_class="SAGEForecaster",
+            algorithm="SAGE-STATIC-LIGHTGBM",
+            serving_role="primary_serving",
+            promoted_to_primary=True,
+            dataset_hash=dataset_hash,
+            nominal_coverage=0.90,
+            artifact_path="artifacts/models/sage_pilot_q1_2024.joblib",
+            sha256=primary_sha,
+            promotion_status_note=(
+                "Active FastAPI serving artifact (Static SAGEForecaster). Uses globally "
+                "calibrated sensitivity bounds; D_sensitivity is constant (~3.32 ug/m^3) across "
+                "inputs and abstentions are driven by age_hours > 12h freshness rule."
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="sage_adaptive_q1_2024",
+            version="2.0.0-shadow-m77",
+            model_class="AdaptiveSAGEForecaster",
+            algorithm="ADAPTIVE-SAGE-LIGHTGBM",
+            serving_role="shadow_research",
+            promoted_to_primary=False,
+            dataset_hash=dataset_hash,
+            nominal_coverage=0.90,
+            artifact_path=None,
+            sha256=None,
+            promotion_status_note=(
+                "Shadow research candidate ONLY (NOT served by primary API). M7.7 causal audit "
+                "(SG-M77-ADAPTIVE-20261125-163505) showed natural Spearman rho=+0.1749 (<0.20 "
+                "target) and +0.47 Winkler penalty vs locally_weighted_mar."
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="locally_weighted_mar_q1_2024",
+            version="1.0.0-shadow",
+            model_class="AdaptiveSAGEForecaster(gamma=0.0)",
+            algorithm="LOCALLY-WEIGHTED-MAR",
+            serving_role="shadow_baseline",
+            promoted_to_primary=False,
+            dataset_hash=dataset_hash,
+            nominal_coverage=0.90,
+            artifact_path=None,
+            sha256=None,
+            promotion_status_note=(
+                "Shadow baseline isolating causal forward-OOF local error scale s(x) under "
+                "MAR (gamma=0.0); achieved best LightGBM-family Winkler in natural (8.72) and LOSO (4.63)."
+            ),
+        ),
+        ModelRegistryEntry(
+            model_id="lightgbm_cqr_q1_2024",
+            version="1.0.0-shadow",
+            model_class="ConformalizedQuantileRegression",
+            algorithm="LIGHTGBM-CQR",
+            serving_role="shadow_baseline",
+            promoted_to_primary=False,
+            dataset_hash=dataset_hash,
+            nominal_coverage=0.90,
+            artifact_path=None,
+            sha256=None,
+            promotion_status_note="Shadow quantile baseline (Romano et al. 2019).",
+        ),
+        ModelRegistryEntry(
+            model_id="persistence_split_q1_2024",
+            version="1.0.0-shadow",
+            model_class="PersistenceForecaster+SplitConformal",
+            algorithm="PERSISTENCE-SPLIT",
+            serving_role="shadow_baseline",
+            promoted_to_primary=False,
+            dataset_hash=dataset_hash,
+            nominal_coverage=0.90,
+            artifact_path=None,
+            sha256=None,
+            promotion_status_note="Shadow persistence reference baseline (natural Winkler 3.16).",
+        ),
+    ]
+
+    return {
+        "schema_version": "1.0",
+        "serving_policy": (
+            "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). "
+            "AdaptiveSAGEForecaster and baselines run strictly in offline/shadow evaluation until "
+            "live matched-outcome criteria are satisfied and operator promotion is approved."
+        ),
+        "primary_model_id": primary_id,
+        "primary_model_class": "SAGEForecaster",
+        "adaptive_sage_promoted": False,
+        "allowed_data_modes": list(ALLOWED_DATA_MODES),
+        "models": [asdict(e) for e in entries],
+    }
+
+
+def load_model_registry(path: Path = DEFAULT_REGISTRY_PATH) -> dict[str, Any]:
+    """Load persistent model registry JSON or build canonical default if absent."""
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return build_default_registry()

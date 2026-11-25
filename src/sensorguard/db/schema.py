@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -216,6 +217,8 @@ class ForecastRun(Base):
     model_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     dataset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     algorithm: Mapped[str] = mapped_column(String(64), nullable=False, default="SAGE-LIGHTGBM")
+    execution_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="serving")
+    data_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="archived_historical")
     nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -271,3 +274,82 @@ class ForecastRecord(Base):
     run: Mapped[ForecastRun] = relationship("ForecastRun", back_populates="forecasts")
     station: Mapped[Station] = relationship("Station")
     sensor: Mapped[Sensor] = relationship("Sensor")
+
+
+class PilotQuotaState(Base):
+    """Durable PostgreSQL/SQLite daily API request budget shared atomically across workers."""
+
+    __tablename__ = "pilot_quota_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="openaq")
+    budget_date_utc: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    requests_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_requests_per_day: Mapped[int] = mapped_column(Integer, nullable=False, default=48)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    __table_args__ = (UniqueConstraint("provider", "budget_date_utc", name="uq_pilot_quota_provider_date"),)
+
+
+class PilotPollLease(Base):
+    """Distributed leader lease preventing concurrent multi-worker OpenAQ polling."""
+
+    __tablename__ = "pilot_poll_leases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lease_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    holder_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+
+class PilotControlState(Base):
+    """Durable operator kill-switch and opt-in polling authorization gate."""
+
+    __tablename__ = "pilot_control_states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    control_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    opt_in_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+
+class PilotIngestAuditRun(Base):
+    """Durable operational audit trail for every live/shadow poll attempt and failure."""
+
+    __tablename__ = "pilot_ingest_audit_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="openaq")
+    worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    window_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    window_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    sensors_polled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    requests_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_revised: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_deduplicated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    records_invalid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recovered_from_expired_lease: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)

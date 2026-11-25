@@ -17,6 +17,7 @@ import httpx
 import joblib
 import pytest
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
@@ -65,9 +66,10 @@ def pg_engine():
 
 def test_postgres_migrations_and_row_counts(pg_engine):
     """Verify Alembic migrations at head and table accessibility in PostgreSQL."""
+    expected_head = ScriptDirectory.from_config(_alembic_cfg(POSTGRES_URL)).get_current_head()
     with pg_engine.connect() as conn:
         ver = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
-        assert ver == "005_persistent_forecasts"
+        assert ver == expected_head
         station_cnt = conn.execute(select(func.count()).select_from(Station)).scalar() or 0
         obs_cnt = conn.execute(select(func.count()).select_from(Observation)).scalar() or 0
         assert station_cnt >= 0
