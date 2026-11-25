@@ -407,3 +407,23 @@ def test_cache_invalidation_on_ingestion(monkeypatch: pytest.MonkeyPatch):
     scheduler = IngestScheduler(config=SchedulerConfig(poll_interval_seconds=1))
     asyncio.run(scheduler.poll_once())
     assert api_mod._CACHED_FEATURE_DF is None
+
+
+def test_cors_headers_for_allowed_and_disallowed_origins():
+    """Verify CORS allows configured frontend origins and omits headers for untrusted origins."""
+    allowed = client.options(
+        "/api/v1/stations",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+    disallowed = client.get(
+        "/health",
+        headers={"Origin": "https://untrusted.example.com"},
+    )
+    assert disallowed.status_code == 200
+    assert "access-control-allow-origin" not in disallowed.headers
