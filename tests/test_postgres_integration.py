@@ -6,6 +6,7 @@ skip cleanly unless a live PostgreSQL instance is provided.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -29,7 +30,6 @@ from sensorguard.db.schema import (
     ForecastRun,
     Observation,
     RawIngestBatch,
-    Sensor,
     Station,
 )
 from sensorguard.ingest import IngestionPipeline
@@ -102,111 +102,109 @@ def test_postgres_versioned_ingest_and_pit_replay(pg_engine):
         sensor = sensors[0]
         session.commit()
 
-        def handler_v1(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "datetime": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
-                            "period": {
-                                "datetimeFrom": {
-                                    "utc": (t_obs - timedelta(hours=1))
-                                    .isoformat()
-                                    .replace("+00:00", "Z")
+        try:
+            def handler_v1(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "datetime": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
+                                "period": {
+                                    "datetimeFrom": {
+                                        "utc": (t_obs - timedelta(hours=1))
+                                        .isoformat()
+                                        .replace("+00:00", "Z")
+                                    },
+                                    "datetimeTo": {
+                                        "utc": t_obs.isoformat().replace("+00:00", "Z")
+                                    },
                                 },
-                                "datetimeTo": {
-                                    "utc": t_obs.isoformat().replace("+00:00", "Z")
-                                },
-                            },
-                            "value": 14.2,
-                            "parameter": {"name": "pm25", "units": "µg/m³"},
-                        }
-                    ]
-                },
-            )
-
-        client_v1 = OpenAQClient(api_key="test", transport=httpx.MockTransport(handler_v1))
-        # Override fetched_at deterministically by patching datetime not needed: replay query after t_fetch_v1
-        res1 = pipeline.ingest_sensor_hours(
-            sensor_db_id=sensor.id,
-            provider_sensor_id=9999011,
-            client=client_v1,
-            max_pages=1,
-        )
-        assert res1.records_inserted == 1
-
-        # Adjust persisted/fetched timestamps deterministically for strict PIT replay verification
-        obs_v1 = session.scalars(
-            select(Observation).where(Observation.sensor_id == sensor.id, Observation.version == 1)
-        ).one()
-        obs_v1.fetched_at = t_fetch_v1
-        obs_v1.persisted_at = t_fetch_v1
-        session.commit()
-
-        # Ingest revised measurement at t_fetch_v2
-        def handler_v2(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "datetime": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
-                            "value": 19.8,
-                            "parameter": {"name": "pm25", "units": "µg/m³"},
-                        }
-                    ]
-                },
-            )
-
-        client_v2 = OpenAQClient(api_key="test", transport=httpx.MockTransport(handler_v2))
-        res2 = pipeline.ingest_sensor_hours(
-            sensor_db_id=sensor.id,
-            provider_sensor_id=9999011,
-            client=client_v2,
-            max_pages=1,
-        )
-        assert res2.records_revised == 1
-        obs_v2 = session.scalars(
-            select(Observation).where(Observation.sensor_id == sensor.id, Observation.version == 2)
-        ).one()
-        obs_v2.fetched_at = t_fetch_v2
-        obs_v2.persisted_at = t_fetch_v2
-        session.commit()
-
-        replay = PointInTimeReplayEngine(session)
-        as_of_early = replay.query_as_of(
-            sensor.id,
-            decision_cutoff=datetime(2026, 2, 1, 13, 0, 0, tzinfo=UTC),
-            mode="prospective",
-        )
-        assert len(as_of_early) == 1
-        assert float(as_of_early.iloc[0]["value"]) == pytest.approx(14.2)
-
-        as_of_late = replay.query_as_of(
-            sensor.id,
-            decision_cutoff=datetime(2026, 2, 1, 16, 0, 0, tzinfo=UTC),
-            mode="prospective",
-        )
-        assert len(as_of_late) == 1
-        assert float(as_of_late.iloc[0]["value"]) == pytest.approx(19.8)
-
-        # Clean up synthetic station and raw batches so pilot dataset counts stay exact
-        batch_ids = [
-            row[0]
-            for row in session.execute(
-                select(RawIngestBatch.id).where(
-                    RawIngestBatch.endpoint == "/v3/sensors/9999011/hours"
+                                "value": 14.2,
+                                "parameter": {"name": "pm25", "units": "µg/m³"},
+                            }
+                        ]
+                    },
                 )
-            ).all()
-        ]
-        session.delete(station)
-        session.flush()
-        for bid in batch_ids:
-            batch = session.get(RawIngestBatch, bid)
-            if batch is not None:
-                session.delete(batch)
-        session.commit()
+
+            client_v1 = OpenAQClient(api_key="test", transport=httpx.MockTransport(handler_v1))
+            res1 = pipeline.ingest_sensor_hours(
+                sensor_db_id=sensor.id,
+                provider_sensor_id=9999011,
+                client=client_v1,
+                max_pages=1,
+            )
+            assert res1.records_inserted == 1
+
+            obs_v1 = session.scalars(
+                select(Observation).where(Observation.sensor_id == sensor.id, Observation.version == 1)
+            ).one()
+            obs_v1.fetched_at = t_fetch_v1
+            obs_v1.persisted_at = t_fetch_v1
+            session.commit()
+
+            def handler_v2(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    json={
+                        "results": [
+                            {
+                                "datetime": {"utc": t_obs.isoformat().replace("+00:00", "Z")},
+                                "value": 19.8,
+                                "parameter": {"name": "pm25", "units": "µg/m³"},
+                            }
+                        ]
+                    },
+                )
+
+            client_v2 = OpenAQClient(api_key="test", transport=httpx.MockTransport(handler_v2))
+            res2 = pipeline.ingest_sensor_hours(
+                sensor_db_id=sensor.id,
+                provider_sensor_id=9999011,
+                client=client_v2,
+                max_pages=1,
+            )
+            assert res2.records_revised == 1
+            obs_v2 = session.scalars(
+                select(Observation).where(Observation.sensor_id == sensor.id, Observation.version == 2)
+            ).one()
+            obs_v2.fetched_at = t_fetch_v2
+            obs_v2.persisted_at = t_fetch_v2
+            session.commit()
+
+            replay = PointInTimeReplayEngine(session)
+            as_of_early = replay.query_as_of(
+                [sensor.id],
+                decision_cutoff=datetime(2026, 2, 1, 13, 0, 0, tzinfo=UTC),
+                mode="prospective",
+            )
+            assert len(as_of_early) == 1
+            assert float(as_of_early.iloc[0]["value"]) == pytest.approx(14.2)
+
+            as_of_late = replay.query_as_of(
+                [sensor.id],
+                decision_cutoff=datetime(2026, 2, 1, 16, 0, 0, tzinfo=UTC),
+                mode="prospective",
+            )
+            assert len(as_of_late) == 1
+            assert float(as_of_late.iloc[0]["value"]) == pytest.approx(19.8)
+        finally:
+            # Clean up synthetic station and raw batches so pilot dataset counts stay exact
+            batch_ids = [
+                row[0]
+                for row in session.execute(
+                    select(RawIngestBatch.id).where(
+                        RawIngestBatch.endpoint == "/v3/sensors/9999011/hours"
+                    )
+                ).all()
+            ]
+            session.delete(station)
+            session.flush()
+            for bid in batch_ids:
+                batch = session.get(RawIngestBatch, bid)
+                if batch is not None:
+                    session.delete(batch)
+            session.commit()
 
 
 def test_postgres_forecast_persistence_and_api_roundtrip(pg_engine):
