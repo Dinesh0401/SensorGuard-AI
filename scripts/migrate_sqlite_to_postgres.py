@@ -91,9 +91,11 @@ def migrate_sqlite_to_postgres(
     if sqlite_url.startswith("sqlite"):
         raw_path = sqlite_url.split("sqlite:///", 1)[-1]
         db_file = Path(raw_path)
-        from scripts.seed_pilot_db import seed_sqlite_pilot_db
+        if not db_file.exists():
+            from scripts.seed_pilot_db import seed_sqlite_pilot_db
 
-        seed_sqlite_pilot_db(db_path=db_file)
+            logger.info("SQLite database %s absent; initializing from verified pilot fixture...", db_file)
+            seed_sqlite_pilot_db(db_path=db_file)
 
     src_engine = create_engine(sqlite_url, echo=False)
     dst_engine = create_engine(target_url, echo=False, pool_pre_ping=True)
