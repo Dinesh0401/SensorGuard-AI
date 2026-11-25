@@ -23,6 +23,7 @@ import os
 import secrets
 import threading
 import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -30,10 +31,11 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from sensorguard.db.schema import Observation, Sensor, Station
 from sensorguard.db.session import create_db_engine, get_session_factory
@@ -71,10 +73,28 @@ logger = logging.getLogger(__name__)
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
 _admin_request_history: list[float] = []
 
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Pre-warm verified model artifact and pilot feature caches per worker on startup."""
+    try:
+        model = get_serving_model()
+        with _SESSION_FACTORY() as session:
+            get_cached_pilot_features(session)
+            with _CACHE_LOCK:
+                st_ids = list(_CACHED_STATION_NAMES.keys()) if _CACHED_STATION_NAMES else []
+            for st_id in st_ids:
+                _compute_station_forecasts_sync(st_id, 24, model, session=session)
+        logger.info("Worker startup pre-warmup completed (%d stations cached).", len(st_ids))
+    except Exception as exc:  # noqa: BLE001 - fail-closed per-request checks remain authoritative
+        logger.warning("Startup pre-warmup skipped or partial: %s", exc)
+    yield
+
+
 app = FastAPI(
     title="SensorGuard AI Pilot & Research API",
     version="0.5.3",
     description="Public pilot API for environmental sensor network forecasting, uncertainty quantification, and outage resilience.",
+    lifespan=lifespan,
 )
 
 _default_cors_origins = "http://localhost:3000,http://127.0.0.1:3000"
@@ -181,7 +201,8 @@ _CACHED_STATION_COORDS: dict[str, tuple[float, float]] | None = None
 _CACHED_STATION_LATEST: dict[int, tuple[datetime | None, float | None]] | None = None
 _CACHED_STATION_SLICES: dict[int, pd.DataFrame] | None = None
 _CACHED_STATION_NAMES: dict[int, str] | None = None
-_CACHED_FORECAST_RESPONSES: dict[tuple[int, int, int], StationForecastsResponse] = {}
+_CACHED_FORECAST_RESPONSES: dict[tuple[int, int, int, float], StationForecastsResponse] = {}
+_CACHED_FORECAST_JSON: dict[tuple[int, int, int, float], bytes] = {}
 _CACHED_MAX_DB_TIME: datetime | None = None
 _ADMIN_EXECUTION_LOCK = asyncio.Lock()
 
@@ -203,6 +224,7 @@ def invalidate_pilot_feature_cache() -> None:
         _CACHED_STATION_SLICES = None
         _CACHED_STATION_NAMES = None
         _CACHED_FORECAST_RESPONSES.clear()
+        _CACHED_FORECAST_JSON.clear()
         _CACHED_MAX_DB_TIME = None
     logger.info("Pilot feature and station observation cache invalidated.")
 
@@ -692,42 +714,40 @@ def get_station_observations(
 # ---------------------------------------------------------------------------
 
 
-@app.get(
-    "/api/v1/stations/{station_id}/forecasts",
-    response_model=StationForecastsResponse,
-    tags=["Forecasts"],
-)
-def get_station_forecasts(
+def _compute_station_forecasts_sync(
     station_id: int,
-    limit: int = Query(24, ge=1, le=168, description="Number of recent forecasts returned"),
-    db: Session = Depends(get_db),
+    limit: int,
+    model: SAGEForecaster,
+    session: Session | None = None,
 ) -> StationForecastsResponse:
-    """Issue point and conservative interval forecasts with guarded abstention decisions."""
-    model = get_serving_model()
-
-    # Fast path: serve immutable cached prediction response when feature cache is warm
+    """Build guarded station forecast response synchronously using cached slices when available."""
+    cache_key = (station_id, limit, id(model), _CACHED_MODEL_LOAD_TIME)
     with _CACHE_LOCK:
-        cached_name = _CACHED_STATION_NAMES.get(station_id) if _CACHED_STATION_NAMES else None
-        cache_key = (station_id, limit, id(model))
-        if cached_name is not None and cache_key in _CACHED_FORECAST_RESPONSES:
+        if cache_key in _CACHED_FORECAST_RESPONSES and _CACHED_STATION_NAMES is not None and station_id in _CACHED_STATION_NAMES:
             return _CACHED_FORECAST_RESPONSES[cache_key]
+        cached_name = _CACHED_STATION_NAMES.get(station_id) if _CACHED_STATION_NAMES else None
 
-    station_name = cached_name
-    if station_name is None:
-        station = db.get(Station, station_id)
-        if not station:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found"
-            )
-        station_name = station.name
+    own_session = session is None
+    db = _SESSION_FACTORY() if own_session else session
+    try:
+        station_name = cached_name
+        if station_name is None:
+            station = db.get(Station, station_id)
+            if not station:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND, detail=f"Station {station_id} not found"
+                )
+            station_name = station.name
 
-    # Load or reuse pre-indexed station feature slice without full-DataFrame equality scans
-    featured_df, _ = get_cached_pilot_features(db)
-    with _CACHE_LOCK:
-        cached_resp = _CACHED_FORECAST_RESPONSES.get((station_id, limit, id(model)))
-        if cached_resp is not None:
-            return cached_resp
-        pre_slice = _CACHED_STATION_SLICES.get(station_id) if _CACHED_STATION_SLICES else None
+        featured_df, _ = get_cached_pilot_features(db)
+        with _CACHE_LOCK:
+            cached_resp = _CACHED_FORECAST_RESPONSES.get(cache_key)
+            if cached_resp is not None:
+                return cached_resp
+            pre_slice = _CACHED_STATION_SLICES.get(station_id) if _CACHED_STATION_SLICES else None
+    finally:
+        if own_session:
+            db.close()
 
     if pre_slice is not None:
         st_df = pre_slice.tail(limit)
@@ -799,10 +819,35 @@ def get_station_forecasts(
         latest_forecast=latest,
         forecasts=forecast_records,
     )
+    payload_bytes = response.model_dump_json().encode("utf-8")
     with _CACHE_LOCK:
         if _CACHED_STATION_NAMES is not None and station_id in _CACHED_STATION_NAMES:
-            _CACHED_FORECAST_RESPONSES[(station_id, limit, id(model))] = response
+            _CACHED_FORECAST_RESPONSES[cache_key] = response
+            _CACHED_FORECAST_JSON[cache_key] = payload_bytes
     return response
+
+
+@app.get(
+    "/api/v1/stations/{station_id}/forecasts",
+    response_model=StationForecastsResponse,
+    tags=["Forecasts"],
+)
+async def get_station_forecasts(
+    station_id: int,
+    limit: int = Query(24, ge=1, le=168, description="Number of recent forecasts returned"),
+) -> Response | StationForecastsResponse:
+    """Issue point and conservative interval forecasts with guarded abstention decisions."""
+    model = get_serving_model()
+
+    # Fast path: serve pre-serialized JSON response directly on event loop when warm
+    cache_key = (station_id, limit, id(model), _CACHED_MODEL_LOAD_TIME)
+    with _CACHE_LOCK:
+        if _CACHED_STATION_NAMES is not None and station_id in _CACHED_STATION_NAMES:
+            payload_bytes = _CACHED_FORECAST_JSON.get(cache_key)
+            if payload_bytes is not None:
+                return Response(content=payload_bytes, media_type="application/json")
+
+    return await run_in_threadpool(_compute_station_forecasts_sync, station_id, limit, model)
 
 
 @app.get(
