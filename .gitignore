@@ -20,4 +20,6 @@ scratch/
 node_modules/
 .next/
 out/
+test-results/
+playwright-report/
 
