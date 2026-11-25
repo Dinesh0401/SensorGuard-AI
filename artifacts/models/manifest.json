@@ -1,6 +1,6 @@
 {
   "algorithm": "SAGE-LIGHTGBM",
-  "created_at": "2026-11-24T16:25:35.507117+00:00",
+  "created_at": "2026-11-25T04:08:50.393371+00:00",
   "dataset_hash": "33805c42097fc86e",
   "extra": {
     "base_model_type": "lightgbm",
@@ -26,6 +26,8 @@
       1.5,
       2.0
     ],
+    "max_disagreement_threshold": 8.0,
+    "max_envelope_width_threshold": 50.0,
     "n_cal": 2937,
     "n_stations": 8,
     "n_test": 3496,
@@ -33,6 +35,6 @@
   },
   "model_id": "sage_pilot_q1_2024",
   "nominal_coverage": 0.9,
-  "sha256": "2a03cd292ffd1ea352934d2926e83e3f331652e5e68190c21265b9c250018add",
+  "sha256": "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115",
   "version": "1.0.0"
 }

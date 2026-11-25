@@ -1,8 +1,8 @@
 # SensorGuard AI — Comprehensive Scientific Benchmark Report
 
-**Benchmark ID:** `SG-BENCH-20261124-162502`  
-**Dataset Hash:** `7e8f2d316bee0c4f`  
-**Evaluation Window:** Q1 2024 (8 verified UK AURN London monitoring stations)  
+**Benchmark ID:** `SG-BENCH-20261125-040900`  
+**Dataset Hash:** `33805c42097fc86e`  
+**Evaluation Window:** Q1 2024 (8 verified UK AURN stations across Greater London and regional England)  
 **Observations:** 8884 train / 2937 calibration / 3496 test  
 **Target Metric:** PM2.5 (+1 hour ahead, nominal coverage 90%)  
 **Evaluation Denominator:** Unified finite-mask denominator across all metrics and regimes.  
@@ -90,18 +90,16 @@ Models trained and calibrated on 7 stations, evaluated strictly on 1 held-out st
 ## 5. Transparent Scientific Analysis & Honest Negative Findings
 
 ### 5.1 When Conventional Methods Win (Sharpness under Exchangeability)
-- Under calm, exchangeable data conditions (Natural and MCAR regimes), **LightGBM + CQR (Romano et al. 2019)** delivers the strongest operational trade-off:
-  - Extremely tight mean interval width (**2.34 µg/m³** vs SAGE's 17.01 µg/m³).
-  - Superior Winkler interval score (**3.51** vs SAGE's 17.06, where lower is better).
-  - Satisfies nominal coverage (96.8% > 90.0% target).
-- **Scientific Takeaway:** When sensor streams are reliable and exchangeability holds, conservative sensitivity envelopes are overly wide. We do NOT claim SAGE is universally superior to CQR for routine conditions.
+- Under calm, exchangeable natural conditions, simpler conformal baselines deliver the sharpest intervals:
+  - **Persistence + Split Conformal:** Mean interval width **2.00 µg/m³**, Winkler score **3.16**, overall coverage **96.9%**.
+  - **LightGBM + CQR (Romano et al. 2019):** Mean interval width **11.35 µg/m³**, Winkler score **11.45**, overall coverage **99.9%** (vs SAGE's **17.01 µg/m³** / Winkler **17.06**).
+- **Scientific Takeaway:** When sensor streams are reliable and exchangeability holds, conservative sensitivity envelopes are unnecessarily wide. We do NOT claim SAGE outperforms CQR or Persistence on routine intervals.
 
-### 5.2 When SAGE Delivers Value (Adversarial MNAR Outages & Guarded Abstention)
+### 5.2 When SAGE Delivers Value (MNAR Sensitivity Enveloping & Guarded Abstention)
 - Under nonrandom missingness (`mnar_gamma_1.5`) and burst outages (`burst_24h`):
-  - Conventional point calibrators assume missingness is uninformative and produce dangerously narrow intervals around outdated readings.
-  - SAGE's sensitivity grid envelope expands dynamically as outage duration grows, bounding the distribution shift across hypothesized Gamma values.
-  - When sensor staleness exceeds 12 hours or scenario disagreement exceeds tolerance, SAGE's **guarded policy explicitly abstains** (12.5% to 18.5% of queries).
-  - On published queries, empirical coverage reaches **100.0%**, completely eliminating high-risk, false-precision forecasts during upstream sensor failures.
+  - Conventional point/split conformal models assume missingness is uninformative or exchangeable.
+  - SAGE separates scenario disagreement ($D_{\text{sensitivity}} = \max_\gamma U_\gamma - \min_\gamma U_\gamma$) from envelope width ($W_{\text{envelope}}$) and applies guarded abstention under synchronized threshold `max_disagreement_threshold = 8.0` and stale-history checks (`age_hours > 12.0`).
+  - Abstention scales strictly with data degradation (**0.4%** under natural data up to **0.9%** under MNAR/burst outages) while maintaining published empirical coverage of **100.0%** under MNAR.
 
 ### 5.3 Unified Denominator Invariant Verification
 - Under `sage_no_abstain` (where every forecast is published), `overall_picp == published_picp` exactly across all scenarios.

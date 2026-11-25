@@ -1,6 +1,6 @@
 {
-  "benchmark_id": "SG-BENCH-20261124-162502",
-  "dataset_hash": "7e8f2d316bee0c4f",
+  "benchmark_id": "SG-BENCH-20261125-040900",
+  "dataset_hash": "33805c42097fc86e",
   "nominal_coverage": 0.9,
   "n_train": 8884,
   "n_calibrate": 2937,

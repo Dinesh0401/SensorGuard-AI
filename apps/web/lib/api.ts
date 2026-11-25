@@ -1,13 +1,15 @@
 /**
  * Typed client for SensorGuard AI FastAPI Backend.
  *
- * Connects directly to authenticated and public staging endpoints:
+ * Strictly aligned with Pydantic schemas in src/sensorguard/schemas.py:
+ * - /health & /health/ready
  * - /api/v1/stations
  * - /api/v1/stations/{id}
  * - /api/v1/stations/{id}/observations
  * - /api/v1/stations/{id}/forecasts
  * - /api/v1/stations/{id}/reliability
  * - /api/v1/research/experiments
+ * - /api/v1/research/experiments/{id}
  * - /api/v1/model/status
  */
 
@@ -17,12 +19,12 @@ export const API_BASE_URL =
 export interface StationSummary {
   id: number;
   provider: string;
-  provider_location_id: string | null;
+  provider_location_id: number;
   name: string;
   latitude: number;
   longitude: number;
-  country: string;
-  timezone_name: string;
+  country: string | null;
+  timezone_name: string | null;
   status: "HEALTHY" | "LATE" | "NO_REPORT" | "OFFLINE_CONFIRMED";
   is_stale: boolean;
   is_archived_pilot: boolean;
@@ -40,11 +42,12 @@ export interface StationListResponse {
 export interface ObservationRecord {
   observed_at: string;
   received_at: string | null;
-  value: number;
+  fetched_at: string;
+  value: number | null;
   unit: string;
   quality_flag: string;
+  source_status: string;
   version: number;
-  is_archived_pilot: boolean;
 }
 
 export interface StationObservationsResponse {
@@ -55,6 +58,7 @@ export interface StationObservationsResponse {
   latest_observed_at: string | null;
   age_hours: number | null;
   freshness_status: "fresh" | "moderate_delay" | "stale";
+  provider_citation: string;
 }
 
 export interface ForecastScenarioBounds {
@@ -76,6 +80,7 @@ export interface ForecastRecord {
   abstain_reason: string;
   is_stale: boolean;
   scenario_bounds: ForecastScenarioBounds[];
+  feature_hash?: string | null;
 }
 
 export interface StationForecastsResponse {
@@ -84,6 +89,7 @@ export interface StationForecastsResponse {
   current_status: "publish" | "caution" | "abstain";
   latest_forecast: ForecastRecord | null;
   forecasts: ForecastRecord[];
+  provider_citation: string;
 }
 
 export interface StationReliabilityResponse {
@@ -101,7 +107,7 @@ export interface StationReliabilityResponse {
     picp: number | null;
     mpiw: number | null;
     winkler_score: number | null;
-  };
+  } | null;
 }
 
 export interface ExperimentSummary {
@@ -111,6 +117,7 @@ export interface ExperimentSummary {
   nominal_coverage: number;
   models_evaluated: string[];
   scenarios_evaluated: string[];
+  timestamp?: string | null;
 }
 
 export interface ExperimentListResponse {
@@ -118,17 +125,28 @@ export interface ExperimentListResponse {
   total_count: number;
 }
 
+export interface ExperimentDetailResponse {
+  experiment_id: string;
+  title: string;
+  details: Record<string, any>;
+  research_caveats: string[];
+}
+
 export interface ModelStatusResponse {
   model_id: string;
   version: string;
-  sha256: string;
-  sha256_verified: boolean;
   algorithm: string;
+  created_at: string;
+  dataset_hash: string;
   nominal_coverage: number;
-  status: string;
+  sha256: string;
+  verified: boolean;
+  model_path: string;
+  artifact_exists: boolean;
+  extra?: Record<string, any> | null;
 }
 
-class ApiError extends Error {
+export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
     super(message);
@@ -152,9 +170,12 @@ async function fetchJson<T>(path: string): Promise<T> {
       const data = await res.json();
       if (data?.detail) errDetail = data.detail;
     } catch {
-      // ignore
+      // ignore non-JSON body
     }
-    throw new ApiError(`Request to ${path} failed (${res.status}): ${errDetail}`, res.status);
+    throw new ApiError(
+      `Request to ${path} failed (${res.status}): ${errDetail}`,
+      res.status
+    );
   }
 
   return res.json() as Promise<T>;
@@ -162,14 +183,28 @@ async function fetchJson<T>(path: string): Promise<T> {
 
 export const api = {
   getStations: () => fetchJson<StationListResponse>("/api/v1/stations"),
-  getStation: (id: number) => fetchJson<StationSummary>(`/api/v1/stations/${id}`),
+  getStation: (id: number) =>
+    fetchJson<StationSummary>(`/api/v1/stations/${id}`),
   getObservations: (id: number, limit = 48) =>
-    fetchJson<StationObservationsResponse>(`/api/v1/stations/${id}/observations?limit=${limit}`),
+    fetchJson<StationObservationsResponse>(
+      `/api/v1/stations/${id}/observations?limit=${limit}`
+    ),
   getForecasts: (id: number, limit = 24) =>
-    fetchJson<StationForecastsResponse>(`/api/v1/stations/${id}/forecasts?limit=${limit}`),
+    fetchJson<StationForecastsResponse>(
+      `/api/v1/stations/${id}/forecasts?limit=${limit}`
+    ),
   getReliability: (id: number) =>
-    fetchJson<StationReliabilityResponse>(`/api/v1/stations/${id}/reliability`),
-  getExperiments: () => fetchJson<ExperimentListResponse>("/api/v1/research/experiments"),
-  getModelStatus: () => fetchJson<ModelStatusResponse>("/api/v1/model/status").catch(() => null),
-  getHealth: () => fetchJson<{ status: string }>("/health"),
+    fetchJson<StationReliabilityResponse>(
+      `/api/v1/stations/${id}/reliability`
+    ),
+  getExperiments: () =>
+    fetchJson<ExperimentListResponse>("/api/v1/research/experiments"),
+  getExperimentDetail: (experimentId: string) =>
+    fetchJson<ExperimentDetailResponse>(
+      `/api/v1/research/experiments/${encodeURIComponent(experimentId)}`
+    ),
+  getModelStatus: () =>
+    fetchJson<ModelStatusResponse>("/api/v1/model/status").catch(() => null),
+  getHealth: () =>
+    fetchJson<{ status: string; data_mode?: string }>("/health"),
 };

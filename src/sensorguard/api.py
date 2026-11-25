@@ -184,7 +184,7 @@ ARTIFACT_DIR = Path("artifacts/models")
 MODEL_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.joblib"
 MODEL_SHA256_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.sha256"
 MANIFEST_PATH = ARTIFACT_DIR / "manifest.json"
-EXPECTED_MODEL_SHA256 = "6155ee41544f4a53b24c4528bbc55afa3f7e3b02aa511f61d65605ff40eab77b"
+EXPECTED_MODEL_SHA256 = "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115"
 
 
 def invalidate_pilot_feature_cache() -> None:
