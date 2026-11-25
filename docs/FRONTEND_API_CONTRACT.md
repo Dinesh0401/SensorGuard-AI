@@ -1,10 +1,11 @@
 # SensorGuard AI — Frontend & API Contract Specification
-**Milestone 5.2 Next.js 15 to FastAPI REST Interface**
+**Milestone 5.3 Verified Next.js 15 to FastAPI REST Interface**
 
-- **Frontend Package:** `apps/web` (Next.js 15.3.9, React 19, Tailwind CSS)
+- **Frontend Package:** `apps/web` (Next.js 15.3.9, React 18.3, TypeScript, Tailwind CSS)
 - **API Client:** [apps/web/lib/api.ts](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/apps/web/lib/api.ts)
-- **Backend Service:** [src/sensorguard/api.py](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/src/sensorguard/api.py) (FastAPI, Uvicorn, SQLAlchemy)
-- **Base URL:** `http://127.0.0.1:8000` (configurable via `NEXT_PUBLIC_API_URL`)
+- **Backend Service:** [src/sensorguard/api.py](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/src/sensorguard/api.py) & [src/sensorguard/schemas.py](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/src/sensorguard/schemas.py)
+- **Base URL:** `http://localhost:8000` (configurable via `NEXT_PUBLIC_API_URL`)
+- **CORS Configuration:** Explicit origins configured via `CORS_ORIGINS` (default: `http://localhost:3000,http://127.0.0.1:3000`)
 
 ---
 
@@ -14,7 +15,7 @@
 flowchart LR
     UI["Next.js 15 Frontend<br/>(apps/web/app/page.tsx)"]
     Client["Typed API Client<br/>(apps/web/lib/api.ts)"]
-    API["FastAPI Backend<br/>(src/sensorguard/api.py)"]
+    API["FastAPI Backend + CORS<br/>(src/sensorguard/api.py)"]
     DB[("SQLite / PostgreSQL<br/>(sensorguard.db)")]
     Model["SAGE Serving Model<br/>(artifacts/models/)"]
 
@@ -26,138 +27,143 @@ flowchart LR
 
 ---
 
-## 2. API Endpoints Specification
+## 2. Verified API Endpoints Specification
 
 ### 2.1 Health & Readiness Probes
-- **`GET /health`**
-  - **Purpose:** Kubernetes liveness probe.
-  - **Response (200):** `{"status": "ok", "app": "SensorGuard AI", "version": "0.1.0"}`
+- **`GET /health` & `GET /healthz`**
+  - **Response (`HealthResponse`, 200):**
+    ```json
+    {
+      "status": "ok",
+      "database_connected": true,
+      "data_mode": "real_pilot",
+      "stations_count": 8,
+      "observations_count": 14556,
+      "timestamp": "2026-11-25T04:00:00Z"
+    }
+    ```
 - **`GET /health/ready` & `GET /api/v1/health/ready`**
-  - **Purpose:** Readiness probe checking database connectivity and verified model serving availability.
-  - **Response (200 / 503):**
+  - **Response (`ReadinessResponse`, 200):**
     ```json
     {
       "status": "ready",
       "database_connected": true,
       "model_loaded": true,
-      "model_version": "SAGE-LIGHTGBM-v1"
+      "model_version": "1.0.0"
     }
     ```
 
 ### 2.2 Station Catalog & Geography
 - **`GET /api/v1/stations`**
-  - **Query Parameters:**
-    - `bbox` (optional string): `"min_lon,min_lat,max_lon,max_lat"`
-    - `is_active` (optional bool)
-  - **Response (200):** `StationListResponse`
+  - **Query Parameters:** `bbox` (optional `"min_lon,min_lat,max_lon,max_lat"`)
+  - **Response (`StationListResponse`, 200):**
     ```json
     {
-      "count": 8,
       "stations": [
         {
           "id": 1,
-          "provider": "UK_AURN",
-          "provider_location_id": "MY1",
-          "name": "London Marylebone Road",
-          "latitude": 51.5225,
-          "longitude": -0.1546,
-          "elevation": 35.0,
-          "is_active": true,
-          "sensors": [
-            {
-              "id": 1,
-              "parameter": "pm25",
-              "unit": "ug/m3",
-              "is_active": true
-            }
-          ]
+          "provider": "openaq",
+          "provider_location_id": 141,
+          "name": "London Harlington - UKA00472",
+          "latitude": 51.4888,
+          "longitude": -0.4416,
+          "country": "GB",
+          "timezone_name": "Europe/London",
+          "status": "HEALTHY",
+          "is_stale": false,
+          "is_archived_pilot": true,
+          "latest_observation_time": "2024-03-31T23:00:00Z",
+          "latest_pm25_value": 10.9,
+          "age_hours": 0.0
         }
-      ]
+      ],
+      "total_count": 8,
+      "provider_citation": "OpenAQ v3 / UK AURN Network (Crown Copyright / OGL)"
     }
     ```
 
 ### 2.3 Station Observations Time Series
 - **`GET /api/v1/stations/{station_id}/observations`**
   - **Query Parameters:**
-    - `parameter` (default `"pm25"`)
-    - `start_time` (optional ISO 8601 string)
-    - `end_time` (optional ISO 8601 string)
-    - `limit` (int, default `168`, max `1000`)
-  - **Response (200):** `ObservationListResponse`
+    - `from` (optional ISO 8601 UTC start timestamp)
+    - `to` (optional ISO 8601 UTC end timestamp)
+    - `limit` (int, default `100`, min `1`, max `1000`)
+  - **Response (`StationObservationsResponse`, 200):**
     ```json
     {
       "station_id": 1,
-      "parameter": "pm25",
-      "count": 24,
+      "station_name": "London Harlington - UKA00472",
       "observations": [
         {
           "observed_at": "2024-03-31T23:00:00Z",
-          "value": 14.2,
-          "unit": "ug/m3",
-          "flags": null
+          "received_at": null,
+          "fetched_at": "2026-11-22T12:00:00Z",
+          "value": 10.9,
+          "unit": "µg/m³",
+          "quality_flag": "VALID",
+          "source_status": "HEALTHY",
+          "version": 1
         }
-      ]
+      ],
+      "total_returned": 48,
+      "latest_observed_at": "2024-03-31T23:00:00Z",
+      "age_hours": 0.0,
+      "freshness_status": "fresh",
+      "provider_citation": "OpenAQ v3 / UK AURN Network (Crown Copyright / OGL)"
     }
     ```
 
 ### 2.4 SAGE Guarded Forecasts
 - **`GET /api/v1/stations/{station_id}/forecasts`**
-  - **Query Parameters:**
-    - `as_of` (optional ISO 8601 string, default latest observed timestamp)
-    - `horizons` (int, default `24`)
-  - **Response (200):** `ForecastListResponse`
+  - **Query Parameters:** `limit` (int, default `24`, min `1`, max `168`)
+  - **Response (`StationForecastsResponse`, 200):**
     ```json
     {
       "station_id": 1,
-      "generated_at": "2026-11-25T03:00:00Z",
-      "forecasts": [
-        {
-          "target_at": "2024-04-01T00:00:00Z",
-          "horizon_hours": 1,
-          "point_forecast": 12.84,
-          "lower_bound": 4.33,
-          "upper_bound": 21.34,
-          "published": true,
-          "scenario_disagreement": 3.32,
-          "abstention_reason": null
-        }
-      ]
+      "station_name": "London Harlington - UKA00472",
+      "current_status": "publish",
+      "latest_forecast": {
+        "station_id": 1,
+        "decision_cutoff": "2024-03-31T23:00:00Z",
+        "target_time": "2024-04-01T00:00:00Z",
+        "point_forecast": 11.4,
+        "lower_bound": 3.1,
+        "upper_bound": 20.1,
+        "nominal_coverage": 0.9,
+        "model_version": "SAGE-LIGHTGBM-v1",
+        "status": "publish",
+        "abstain_reason": "sufficient_evidence",
+        "is_stale": false,
+        "scenario_bounds": [
+          {"gamma": 0.0, "lower": 4.2, "upper": 17.5},
+          {"gamma": 2.0, "lower": 3.1, "upper": 20.1}
+        ],
+        "feature_hash": null
+      },
+      "forecasts": ["..."],
+      "provider_citation": "OpenAQ v3 / UK AURN Network"
     }
     ```
-  - **Error States:**
-    - `404 Not Found`: Station ID does not exist.
-    - `503 Service Unavailable`: Model artifact missing, SHA-256 corrupted, or unmanifested.
+  - **Error States:** `404` if station missing; `503` if model artifact missing or SHA-256 verification fails.
 
-### 2.5 Reliability Metrics
+### 2.5 Reliability Metrics & Research Experiments
 - **`GET /api/v1/stations/{station_id}/reliability`**
-  - **Query Parameters:**
-    - `window_hours` (int, default `168`)
-  - **Response (200):**
-    ```json
-    {
-      "station_id": 1,
-      "window_hours": 168,
-      "empirical_coverage": 0.9993,
-      "target_coverage": 0.9,
-      "mean_interval_width": 17.01,
-      "abstention_rate": 0.0044,
-      "published_forecasts_count": 2715,
-      "abstained_forecasts_count": 12
-    }
-    ```
+  - Returns `StationReliabilityResponse`: `total_observations`, `first_observed_at`, `last_observed_at`, `gap_rate_pct`, `longest_consecutive_outage_hours`, `status_distribution`, and `benchmark_metrics`.
+- **`GET /api/v1/research/experiments`** & **`GET /api/v1/research/experiments/{experiment_id}`**
+  - Returns catalog (`ExperimentListResponse`) and full audit metrics (`ExperimentDetailResponse`) with declared `research_caveats`.
 
 ### 2.6 Cryptographic Model Status
 - **`GET /api/v1/model/status`**
-  - **Response (200):**
+  - **Response (`ModelStatusResponse`, 200):**
     ```json
     {
       "model_id": "sage_pilot_q1_2024",
-      "version": "SAGE-LIGHTGBM-v1",
-      "algorithm": "SAGE (Sensitivity-Aware Guarded Ensemble)",
-      "created_at": "2026-11-25T02:40:00Z",
+      "version": "1.0.0",
+      "algorithm": "SAGE-LIGHTGBM",
+      "created_at": "2026-11-25T04:08:50Z",
       "dataset_hash": "33805c42097fc86e",
       "nominal_coverage": 0.9,
-      "sha256": "2a03cd292ffd1ea352934d2926e83e3f331652e5e68190c21265b9c250018add",
+      "sha256": "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115",
       "verified": true,
       "model_path": "artifacts/models/sage_pilot_q1_2024.joblib",
       "artifact_exists": true
@@ -166,23 +172,9 @@ flowchart LR
 
 ---
 
-## 3. Frontend Implementation Details
+## 3. Frontend Visual & Integrity Behavior
 
-### Station Coordinates & London Geographic Mapping
-Real coordinates for all 8 London AURN pilot stations are mapped in [page.tsx](file:///c:/Users/Uma/Downloads/Project3/SensorGuard-AI/apps/web/app/page.tsx):
-- `Bloomsbury`: (51.5223° N, -0.1259° W)
-- `Marylebone Road`: (51.5225° N, -0.1546° W)
-- `Westminster`: (51.4947° N, -0.1319° W)
-- `Bexley`: (51.4660° N, 0.1486° E)
-- `Eltham`: (51.4526° N, 0.0708° E)
-- `Harlington`: (51.4888° N, -0.4416° W)
-- `Haringey Priory Park`: (51.5841° N, -0.1256° W)
-- `North Kensington`: (51.5211° N, -0.2135° W)
-
-### Uncertainty Canvas Visualization
-The forecast chart renders the conservative prediction interval envelope $[L_{\min}, U_{\max}]$ using dynamic SVG path shading (`rgba(59, 130, 246, 0.15)`), point predictions (solid line), and past observations (solid line), flagging points where $D_{\text{sensitivity}} > 8.0$ with red abstention markers.
-
-### Explicit Demonstration Mode Toggle
-If the backend is not running or the user requests offline demonstration, the dashboard provides a prominent amber banner:
-`"⚠️ DEMO MODE ACTIVE — Using archived demonstration data (Backend offline or toggle enabled)"`
-The toggle allows instant switching between live API query mode and local demonstration mode.
+- **UK AURN 8-Station Network Projection:** Covers latitudes `50.6°N–53.8°N` and longitudes `-2.6°W–1.4°E`, accurately rendering London Harlington, London Hillingdon, Westminster Marylebone Road, Bexley Slade Green, Southampton Centre, Wicken Fen, St Osyth, and Manchester Piccadilly.
+- **Timestamp-Aligned Chart Without Gap Fabrication:** Observed values are joined strictly to forecast timestamps by UTC hour (`YYYY-MM-DDTHH`). Unobserved intervals leave gaps rather than substituting model predictions.
+- **Interactive Simulator Lab:** Queries `/api/v1/research/experiments/{id}` dynamically across `natural`, `mcar_20`, `mnar_gamma_1.5`, and `burst_24h` regimes, clearly separating `NATURAL OBSERVED` vs `SIMULATED OUTAGE`.
+- **Demonstration Mode Fallback:** Prominently displays an explicit fallback banner when backend connectivity is absent or manually toggled.
