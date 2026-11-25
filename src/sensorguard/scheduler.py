@@ -12,8 +12,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -38,6 +40,7 @@ class SchedulerConfig:
         max_batch_size: Maximum records requested per station cycle.
         enabled: Whether automated background scheduling is active (default False).
         fetch_live_provider: Whether to query upstream OpenAQ API (default False).
+        lock_file: File path for inter-process locking (default 'ingest.lock').
     """
 
     poll_interval_seconds: int = 3600
@@ -46,6 +49,71 @@ class SchedulerConfig:
     max_batch_size: int = 100
     enabled: bool = False
     fetch_live_provider: bool = False
+    lock_file: str = "ingest.lock"
+
+
+class InterProcessFileLock:
+    """File-based lock for coordinating across multiple worker processes.
+
+    Uses atomic file creation (os.O_CREAT | os.O_EXCL) with stale lock detection.
+    """
+
+    def __init__(self, lock_file: Path | str = "ingest.lock", timeout_seconds: float = 600.0) -> None:
+        self.lock_file = Path(lock_file)
+        self.timeout_seconds = timeout_seconds
+        self._fd: int | None = None
+        self._acquired: bool = False
+
+    def acquire(self) -> bool:
+        """Attempt to acquire file lock non-blockingly."""
+        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
+        if self.lock_file.exists():
+            try:
+                mtime = self.lock_file.stat().st_mtime
+                if (time.time() - mtime) > self.timeout_seconds:
+                    logger.warning(
+                        "Overwriting stale ingest lock '%s' (exceeded %.0fs)",
+                        self.lock_file,
+                        self.timeout_seconds,
+                    )
+                    try:
+                        self.lock_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
+
+        try:
+            flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
+            self._fd = os.open(str(self.lock_file), flags)
+            pid_info = f"pid={os.getpid()} acquired_at={time.time()}\n"
+            os.write(self._fd, pid_info.encode())
+            self._acquired = True
+            return True
+        except (FileExistsError, OSError):
+            self._acquired = False
+            return False
+
+    def release(self) -> None:
+        """Release file lock and remove lock file."""
+        if self._fd is not None:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        if self._acquired:
+            try:
+                self.lock_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._acquired = False
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.release()
 
 
 class IngestScheduler:
@@ -70,6 +138,8 @@ class IngestScheduler:
         self._last_poll_time: datetime | None = None
         self._last_poll_status: str = "IDLE"
         self._poll_lock = asyncio.Lock()
+        self.lock_file = Path(self.config.lock_file)
+        self._file_lock = InterProcessFileLock(self.lock_file)
 
     @property
     def is_running(self) -> bool:
@@ -139,73 +209,92 @@ class IngestScheduler:
     async def poll_once(self) -> dict[str, Any]:
         """Execute a single bounded polling cycle across the pilot network.
 
-        Guards against duplicate polling workers and optionally retrieves
+        Guards against duplicate polling workers via both in-memory and file-based locks,
+        invalidates pilot feature caches on cycle completion, and optionally retrieves
         bounded upstream observations if live provider fetching is configured.
         """
         if self._poll_lock.locked():
             logger.warning("Scheduled poll cycle already running; skipping duplicate invocation.")
             return {"status": "SKIPPED_DUPLICATE", "message": "Prior poll active"}
 
-        async with self._poll_lock:
-            now_utc = datetime.now(UTC)
-            logger.info("Executing scheduled ingestion poll at %s...", now_utc.isoformat())
+        if not self._file_lock.acquire():
+            logger.warning(
+                "Inter-process ingest lock '%s' is held by another process; skipping duplicate cycle.",
+                self.lock_file,
+            )
+            return {"status": "SKIPPED_LOCKED", "message": "Prior poll active in another process"}
 
-            with self.session_factory() as session:
-                try:
-                    freshness = self.check_network_freshness(session)
-                    records_ingested = 0
-                    provider_notes = "Audit freshness completed."
+        try:
+            async with self._poll_lock:
+                now_utc = datetime.now(UTC)
+                logger.info("Executing scheduled ingestion poll at %s...", now_utc.isoformat())
 
-                    if self.config.fetch_live_provider:
-                        api_key = os.getenv("OPENAQ_API_KEY")
-                        if api_key:
-                            try:
-                                client = OpenAQClient(api_key=api_key)
-                                pipeline = IngestionPipeline(session)
-                                sensors = session.scalars(
-                                    select(Sensor).where(Sensor.parameter == "pm25")
-                                ).all()
-                                for s in sensors:
-                                    res = pipeline.ingest_sensor_hours(
-                                        sensor_db_id=s.id,
-                                        provider_sensor_id=s.provider_sensor_id,
-                                        client=client,
-                                        max_pages=1,
-                                        page_size=self.config.max_batch_size,
-                                    )
-                                    records_ingested += res.records_persisted
-                                session.commit()
-                                provider_notes = f"Ingested {records_ingested} new observations."
-                            except Exception as pe:  # noqa: BLE001
-                                logger.warning("Live provider retrieval failed gracefully: %s", pe)
-                                provider_notes = f"Live provider pull skipped: {pe}"
-                        else:
-                            provider_notes = (
-                                "Live fetch requested but OPENAQ_API_KEY unconfigured; ran audit only."
-                            )
+                with self.session_factory() as session:
+                    try:
+                        freshness = self.check_network_freshness(session)
+                        records_ingested = 0
+                        provider_notes = "Audit freshness completed."
 
-                    self._last_poll_time = now_utc
-                    self._last_poll_status = "SUCCESS"
-                    logger.info(
-                        "Network audit: %d stations (%d healthy, %d late, %d no_report) - %s",
-                        freshness["total_stations"],
-                        freshness["healthy"],
-                        freshness["late"],
-                        freshness["no_report"],
-                        provider_notes,
-                    )
-                    return {
-                        "status": "SUCCESS",
-                        "timestamp": now_utc.isoformat(),
-                        "records_ingested": records_ingested,
-                        "provider_notes": provider_notes,
-                        "freshness": freshness,
-                        "total_stations": freshness["total_stations"],
-                    }
-                except Exception as e:  # noqa: BLE001 - scheduler must log and remain resilient
-                    self._last_poll_status = f"FAILED: {e}"
-                    logger.error("Scheduled polling failed: %s", e)
-                    return {"error": str(e), "status": "FAILED"}
+                        if self.config.fetch_live_provider:
+                            api_key = os.getenv("OPENAQ_API_KEY")
+                            if api_key:
+                                try:
+                                    client = OpenAQClient(api_key=api_key)
+                                    pipeline = IngestionPipeline(session)
+                                    sensors = session.scalars(
+                                        select(Sensor).where(Sensor.parameter == "pm25")
+                                    ).all()
+                                    for s in sensors:
+                                        res = pipeline.ingest_sensor_hours(
+                                            sensor_db_id=s.id,
+                                            provider_sensor_id=s.provider_sensor_id,
+                                            client=client,
+                                            max_pages=1,
+                                            page_size=self.config.max_batch_size,
+                                        )
+                                        records_ingested += res.records_persisted
+                                    session.commit()
+                                    provider_notes = f"Ingested {records_ingested} new observations."
+                                except Exception as pe:  # noqa: BLE001
+                                    logger.warning("Live provider retrieval failed gracefully: %s", pe)
+                                    provider_notes = f"Live provider pull skipped: {pe}"
+                            else:
+                                provider_notes = (
+                                    "Live fetch requested but OPENAQ_API_KEY unconfigured; ran audit only."
+                                )
+
+                        # Invalidate feature cache on ingestion cycle
+                        try:
+                            from sensorguard.api import invalidate_pilot_feature_cache
+
+                            invalidate_pilot_feature_cache()
+                        except Exception as ie:  # noqa: BLE001
+                            logger.debug("Feature cache invalidation hook skipped: %s", ie)
+
+                        self._last_poll_time = now_utc
+                        self._last_poll_status = "SUCCESS"
+                        logger.info(
+                            "Network audit: %d stations (%d healthy, %d late, %d no_report) - %s",
+                            freshness["total_stations"],
+                            freshness["healthy"],
+                            freshness["late"],
+                            freshness["no_report"],
+                            provider_notes,
+                        )
+                        return {
+                            "status": "SUCCESS",
+                            "timestamp": now_utc.isoformat(),
+                            "records_ingested": records_ingested,
+                            "provider_notes": provider_notes,
+                            "freshness": freshness,
+                            "total_stations": freshness["total_stations"],
+                        }
+                    except Exception as e:  # noqa: BLE001 - scheduler must log and remain resilient
+                        self._last_poll_status = f"FAILED: {e}"
+                        logger.error("Scheduled polling failed: %s", e)
+                        return {"error": str(e), "status": "FAILED"}
+        finally:
+            self._file_lock.release()
 
     async def run_loop(self, max_cycles: int | None = None) -> None:
         """Run continuous asynchronous polling loop with bounded cycles for testing."""

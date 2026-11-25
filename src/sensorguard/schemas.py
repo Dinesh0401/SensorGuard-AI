@@ -23,6 +23,31 @@ class HealthResponse(BaseModel):
     timestamp: datetime = Field(..., description="UTC server timestamp")
 
 
+class ReadinessResponse(BaseModel):
+    """Readiness probe indicating database connectivity and model serving availability."""
+
+    status: str = Field(..., description="'ready' or 'not_ready'")
+    database_connected: bool = Field(..., description="True if database connection check succeeded")
+    model_loaded: bool = Field(..., description="True if offline model artifact is verified and ready")
+    model_version: str = Field(..., description="Loaded model version or 'none'")
+
+
+class ModelStatusResponse(BaseModel):
+    """Model governance metadata, cryptographic verification status, and configuration."""
+
+    model_id: str
+    version: str
+    algorithm: str
+    created_at: str
+    dataset_hash: str
+    nominal_coverage: float
+    sha256: str
+    verified: bool
+    model_path: str
+    artifact_exists: bool
+    extra: dict[str, Any] | None = None
+
+
 class StationSummary(BaseModel):
     """Metadata, geographic coordinates, and reporting health for a monitoring station."""
 

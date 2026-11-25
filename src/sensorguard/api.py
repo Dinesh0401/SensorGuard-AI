@@ -29,7 +29,7 @@ from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
@@ -41,6 +41,7 @@ from sensorguard.models.data import (
     load_pilot_dataset_from_db,
     partition_dataset,
 )
+from sensorguard.models.manifest import ModelManifest
 from sensorguard.models.sage import SAGEConfig, SAGEForecaster
 from sensorguard.schemas import (
     AdminEvaluateRequest,
@@ -53,7 +54,9 @@ from sensorguard.schemas import (
     ForecastRecord,
     ForecastScenarioBounds,
     HealthResponse,
+    ModelStatusResponse,
     ObservationRecord,
+    ReadinessResponse,
     StationForecastsResponse,
     StationListResponse,
     StationObservationsResponse,
@@ -72,6 +75,36 @@ app = FastAPI(
     version="0.5.0",
     description="Public pilot API for environmental sensor network forecasting, uncertainty quantification, and outage resilience.",
 )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """Structured request logging middleware capturing method, path, status_code, and latency_ms."""
+    t0 = time.perf_counter()
+    method = request.method
+    path = request.url.path
+    try:
+        response = await call_next(request)
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        logger.info(
+            "HTTP_REQUEST method=%s path=%s status_code=%d latency_ms=%.2f",
+            method,
+            path,
+            response.status_code,
+            latency_ms,
+        )
+        response.headers["X-Process-Time-Ms"] = str(latency_ms)
+        return response
+    except Exception as exc:
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        logger.error(
+            "HTTP_REQUEST_ERROR method=%s path=%s error=%s latency_ms=%.2f",
+            method,
+            path,
+            str(exc),
+            latency_ms,
+        )
+        raise
 
 _ENGINE = create_db_engine()
 _SESSION_FACTORY = get_session_factory(_ENGINE)
@@ -137,15 +170,37 @@ _ADMIN_EXECUTION_LOCK = asyncio.Lock()
 ARTIFACT_DIR = Path("artifacts/models")
 MODEL_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.joblib"
 MODEL_SHA256_PATH = ARTIFACT_DIR / "sage_pilot_q1_2024.sha256"
+MANIFEST_PATH = ARTIFACT_DIR / "manifest.json"
 EXPECTED_MODEL_SHA256 = "6155ee41544f4a53b24c4528bbc55afa3f7e3b02aa511f61d65605ff40eab77b"
 
 
-def verify_model_sha256(path: Path) -> bool:
+def invalidate_pilot_feature_cache() -> None:
+    """Clear cached in-memory spatiotemporal feature matrices and station metadata."""
+    global _CACHED_FEATURE_DF, _CACHED_STATION_COORDS, _CACHED_STATION_LATEST, _CACHED_MAX_DB_TIME
+    _CACHED_FEATURE_DF = None
+    _CACHED_STATION_COORDS = None
+    _CACHED_STATION_LATEST = None
+    _CACHED_MAX_DB_TIME = None
+    logger.info("Pilot feature and station observation cache invalidated.")
+
+
+def verify_model_sha256(path: Path | None = None) -> bool:
     """Verify SHA-256 cryptographic integrity hash of persisted model artifact."""
-    if not path.exists():
+    target_path = path or MODEL_PATH
+    if not target_path.exists():
         return False
-    content = path.read_bytes()
+    content = target_path.read_bytes()
     computed_hash = hashlib.sha256(content).hexdigest().lower()
+
+    # Verify against manifest.json if present
+    if MANIFEST_PATH.exists():
+        try:
+            manifest = ModelManifest.load(MANIFEST_PATH)
+            if secrets.compare_digest(computed_hash, manifest.sha256.lower()):
+                return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not read stored manifest: %s", e)
+
     expected_hash = EXPECTED_MODEL_SHA256.lower()
     if MODEL_SHA256_PATH.exists():
         try:
@@ -200,65 +255,58 @@ def get_cached_pilot_features(session: Session) -> tuple[pd.DataFrame, dict[str,
     return _CACHED_FEATURE_DF, _CACHED_STATION_COORDS
 
 
-def get_or_train_sage_model(session: Session) -> SAGEForecaster:
-    """Retrieve cached SAGE model or load pre-trained artifact with cryptographic SHA-256 integrity verification."""
+def get_serving_model(session: Session | None = None) -> SAGEForecaster:
+    """Retrieve cached SAGE serving model or load verified pre-trained artifact.
+
+    Fails closed with HTTP 503 if the artifact is missing, unverified, or corrupted.
+    Does NOT train models dynamically on the request path.
+    """
     global _CACHED_SAGE_MODEL, _CACHED_MODEL_LOAD_TIME
     if _CACHED_SAGE_MODEL is not None:
         return _CACHED_SAGE_MODEL
 
-    if MODEL_PATH.exists():
-        if not verify_model_sha256(MODEL_PATH):
-            logger.critical(
-                "SECURITY_ALERT: SAGE model artifact SHA-256 check failed! Rejecting corrupted model artifact."
-            )
-        else:
-            try:
-                logger.info("Loading cryptographically verified SAGE model from %s...", MODEL_PATH)
-                model = joblib.load(MODEL_PATH)
-                _CACHED_SAGE_MODEL = model
-                _CACHED_MODEL_LOAD_TIME = time.time()
-                return model
-            except Exception as e:  # noqa: BLE001
-                logger.warning("Could not load persisted model: %s. Re-fitting...", e)
-
-    logger.info("Initializing and training SAGE model for inference...")
-    featured_df, station_coords = get_cached_pilot_features(session)
-    if featured_df.empty or len(featured_df) < 50:
+    if not MODEL_PATH.exists() or not MANIFEST_PATH.exists():
+        logger.error("Serving model artifact or manifest missing at %s / %s", MODEL_PATH, MANIFEST_PATH)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Pilot feature dataset unavailable in database to fit SAGE model",
+            detail="Model artifact unavailable, corrupted, or untrusted. Offline training required.",
         )
-    splits = partition_dataset(featured_df, station_coords, train_pct=0.60, cal_pct=0.20)
-
-    cfg = SAGEConfig(
-        gamma_grid=(0.0, 0.5, 1.0, 1.5, 2.0),
-        nominal_coverage=0.90,
-        max_disagreement_threshold=20.0,
-        min_effective_sample_size=15,
-        stale_age_hours=12.0,
-        caution_age_hours=3.0,
-    )
-    model = SAGEForecaster(config=cfg, feature_columns=splits.feature_columns)
-    model.fit(
-        X=splits.train,
-        y=splits.train["target"].to_numpy(),
-        X_cal=splits.calibrate,
-        y_cal=splits.calibrate["target"].to_numpy(),
-    )
 
     try:
-        ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model, MODEL_PATH)
-        content = MODEL_PATH.read_bytes()
-        sha = hashlib.sha256(content).hexdigest()
-        MODEL_SHA256_PATH.write_text(f"{sha}  sage_pilot_q1_2024.joblib\n", encoding="utf-8")
-        logger.info("Saved trained SAGE model artifact and SHA-256 to %s", MODEL_PATH)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not persist model artifact: %s", e)
+        manifest = ModelManifest.load(MANIFEST_PATH)
+    except Exception as e:
+        logger.error("Failed to parse model manifest: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model artifact unavailable, corrupted, or untrusted. Offline training required.",
+        ) from e
 
-    _CACHED_SAGE_MODEL = model
-    _CACHED_MODEL_LOAD_TIME = time.time()
-    return model
+    if not manifest.verify_file(MODEL_PATH):
+        logger.critical(
+            "SECURITY_ALERT: SAGE model artifact SHA-256 check failed! Expected %s",
+            manifest.sha256,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model artifact unavailable, corrupted, or untrusted. Offline training required.",
+        )
+
+    try:
+        logger.info("Loading cryptographically verified SAGE model from %s...", MODEL_PATH)
+        model = joblib.load(MODEL_PATH)
+        _CACHED_SAGE_MODEL = model
+        _CACHED_MODEL_LOAD_TIME = time.time()
+        return model
+    except Exception as e:
+        logger.error("Failed to unpickle model artifact: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model artifact unavailable, corrupted, or untrusted. Offline training required.",
+        ) from e
+
+
+# Backward compatibility alias
+get_or_train_sage_model = get_serving_model
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +338,78 @@ def healthz(db: Session = Depends(get_db)) -> HealthResponse:
         stations_count=stations_count,
         observations_count=obs_count,
         timestamp=datetime.now(UTC),
+    )
+
+
+@app.get("/health/ready", response_model=ReadinessResponse, tags=["System"])
+@app.get("/api/v1/health/ready", response_model=ReadinessResponse, tags=["System"])
+def health_ready(db: Session = Depends(get_db)) -> ReadinessResponse:
+    """Readiness probe checking database connectivity and model serving availability."""
+    db_ok = False
+    try:
+        db.scalar(select(func.count(Station.id)))
+        db_ok = True
+    except Exception as e:
+        logger.error("Readiness check DB query failed: %s", e)
+        db_ok = False
+
+    model_ok = False
+    model_version = "none"
+    try:
+        model = get_serving_model()
+        model_ok = model is not None
+        if MANIFEST_PATH.exists():
+            manifest = ModelManifest.load(MANIFEST_PATH)
+            model_version = manifest.version
+        elif hasattr(model, "config"):
+            model_version = f"SAGE-{model.config.base_model_type.upper()}-v1"
+    except Exception as e:
+        logger.warning("Readiness check model loading failed: %s", e)
+        model_ok = False
+        model_version = "unavailable"
+
+    status_str = "ready" if (db_ok and model_ok) else "not_ready"
+    return ReadinessResponse(
+        status=status_str,
+        database_connected=db_ok,
+        model_loaded=model_ok,
+        model_version=model_version,
+    )
+
+
+@app.get("/api/v1/model/status", response_model=ModelStatusResponse, tags=["Model"])
+def get_model_status() -> ModelStatusResponse:
+    """Return model governance metadata, SHA-256 verification status, and configuration from manifest.json."""
+    if not MANIFEST_PATH.exists():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model manifest not found. Offline training required.",
+        )
+
+    try:
+        manifest = ModelManifest.load(MANIFEST_PATH)
+    except Exception as e:
+        logger.error("Could not parse manifest.json: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Corrupted model manifest: {e}",
+        ) from e
+
+    artifact_exists = MODEL_PATH.exists()
+    verified = manifest.verify_file(MODEL_PATH) if artifact_exists else False
+
+    return ModelStatusResponse(
+        model_id=manifest.model_id,
+        version=manifest.version,
+        algorithm=manifest.algorithm,
+        created_at=manifest.created_at,
+        dataset_hash=manifest.dataset_hash,
+        nominal_coverage=manifest.nominal_coverage,
+        sha256=manifest.sha256,
+        verified=verified,
+        model_path=str(MODEL_PATH),
+        artifact_exists=artifact_exists,
+        extra=manifest.extra,
     )
 
 
@@ -549,7 +669,7 @@ def get_station_forecasts(
             forecasts=[],
         )
 
-    model = get_or_train_sage_model(db)
+    model = get_serving_model()
     res = model.predict_guarded(st_df)
 
     forecast_records: list[ForecastRecord] = []
@@ -835,6 +955,7 @@ async def admin_ingest(
     async with _ADMIN_EXECUTION_LOCK:
         t0 = time.time()
         cnt_before = db.scalar(select(func.count(Observation.id))) or 0
+        invalidate_pilot_feature_cache()
         duration = round(time.time() - t0, 3)
 
         return AdminIngestResponse(
