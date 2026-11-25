@@ -13,11 +13,16 @@ import logging
 import os
 import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from sqlalchemy import MetaData, Table, create_engine, func, select, text
 from sqlalchemy.engine import Engine
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -82,6 +87,13 @@ def migrate_sqlite_to_postgres(
         raise ValueError("Target PostgreSQL URL must be supplied via --target-url or DATABASE_URL")
     if not target_url.startswith("postgresql"):
         raise ValueError(f"Target URL must be PostgreSQL, got: {target_url.split('://')[0]}")
+
+    if sqlite_url.startswith("sqlite"):
+        raw_path = sqlite_url.split("sqlite:///", 1)[-1]
+        db_file = Path(raw_path)
+        from scripts.seed_pilot_db import seed_sqlite_pilot_db
+
+        seed_sqlite_pilot_db(db_path=db_file)
 
     src_engine = create_engine(sqlite_url, echo=False)
     dst_engine = create_engine(target_url, echo=False, pool_pre_ping=True)

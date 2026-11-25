@@ -163,32 +163,52 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         y_tr = y_arr[valid_train]
         n_tr = len(y_tr)
 
-        # 2. Compute strictly out-of-fold residuals within training split ONLY
+        # 2. Strictly causal forward expanding-window out-of-sample residual estimation
+        # Order chronologically by timestamp so historical data strictly precedes future data
         if "timestamp" in X_tr.columns:
             order = np.argsort(pd.to_datetime(X_tr["timestamp"]).to_numpy())
         else:
             order = np.arange(n_tr)
 
-        k_folds = max(2, min(self.config.n_oof_folds, n_tr // 20))
-        fold_slices = np.array_split(order, k_folds)
-        oof_res = np.zeros(n_tr, dtype=float)
+        X_tr_sorted = X_tr.iloc[order].reset_index(drop=True)
+        y_tr_sorted = y_tr[order]
 
-        for fold_idx in fold_slices:
-            train_mask = np.ones(n_tr, dtype=bool)
-            train_mask[fold_idx] = False
-            if train_mask.sum() < 5:
+        # Use forward expanding folds: fold 0 is initial training history;
+        # for fold k in 1..K-1, model is trained STRICTLY on folds 0..k-1 (timestamps t < t_eval)
+        k_folds = max(2, min(self.config.n_oof_folds, n_tr // 10))
+        fold_slices = np.array_split(np.arange(n_tr), k_folds)
+
+        causal_eval_indices_list: list[np.ndarray] = []
+        causal_eval_res_list: list[np.ndarray] = []
+
+        for k in range(1, len(fold_slices)):
+            train_idx = np.concatenate(fold_slices[:k])
+            test_idx = fold_slices[k]
+            if len(train_idx) < 5 or len(test_idx) == 0:
                 continue
             sub_model = self._make_base_forecaster(cols)
-            sub_model.fit(X_tr.iloc[train_mask][cols], y_tr[train_mask])
-            sub_pred = sub_model.predict(X_tr.iloc[fold_idx][cols])
-            oof_res[fold_idx] = np.abs(y_tr[fold_idx] - sub_pred)
+            sub_model.fit(X_tr_sorted.iloc[train_idx][cols], y_tr_sorted[train_idx])
+            sub_pred = sub_model.predict(X_tr_sorted.iloc[test_idx][cols])
+            e_k = np.abs(y_tr_sorted[test_idx] - sub_pred)
+            causal_eval_indices_list.append(test_idx)
+            causal_eval_res_list.append(e_k)
 
-        # 3. Fit local error scale estimator s(x) on log(|e_oof| + eps)
-        med_oof = float(np.median(oof_res)) if n_tr > 0 else 1.0
+        if causal_eval_indices_list:
+            causal_idx = np.concatenate(causal_eval_indices_list)
+            causal_res = np.concatenate(causal_eval_res_list)
+        else:
+            causal_idx = np.arange(n_tr)
+            causal_res = np.full(n_tr, 1.0, dtype=float)
+
+        self.causal_oof_count = len(causal_res)
+        self.causal_oof_median = float(np.median(causal_res)) if len(causal_res) > 0 else 1.0
+
+        # 3. Fit local error scale estimator s(x) strictly on forward causal out-of-sample residuals
+        med_oof = self.causal_oof_median
         self.min_scale = max(self.config.min_local_scale, 0.15)
         self.max_scale = max(self.min_scale * 4.0, 6.0 * max(med_oof, 0.5))
-        log_targets = np.log(np.clip(oof_res, self.min_scale, self.max_scale))
-        self.scale_model.fit(X_tr[cols], log_targets)
+        log_targets = np.log(np.clip(causal_res, self.min_scale, self.max_scale))
+        self.scale_model.fit(X_tr_sorted.iloc[causal_idx][cols], log_targets)
         self._scale_fitted = True
 
         # 4. Fit full point forecaster on training split

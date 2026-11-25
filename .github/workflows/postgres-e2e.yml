@@ -42,6 +42,7 @@ jobs:
           DATABASE_URL: postgresql+psycopg2://postgres:sg_ci_postgres_password@127.0.0.1:5432/sensorguard
           SENSORGUARD_TEST_POSTGRES_URL: postgresql+psycopg2://postgres:sg_ci_postgres_password@127.0.0.1:5432/sensorguard
         run: |
+          python scripts/seed_pilot_db.py
           alembic upgrade head
           python scripts/migrate_sqlite_to_postgres.py
           ruff check src tests scripts alembic
@@ -78,6 +79,10 @@ jobs:
           npm run lint
           npm run build
           npx playwright install --with-deps chromium
+
+      - name: Seed SQLite pilot database for E2E backend
+        run: |
+          python scripts/seed_pilot_db.py
 
       - name: Run Playwright E2E against live FastAPI + built web export
         run: |

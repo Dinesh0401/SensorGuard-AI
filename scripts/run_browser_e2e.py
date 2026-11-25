@@ -13,6 +13,9 @@ import httpx
 ROOT_DIR = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT_DIR / "apps" / "web"
 
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 
 def _wait_ready(url: str, timeout_s: float = 45.0) -> None:
     deadline = time.monotonic() + timeout_s
@@ -34,6 +37,12 @@ def main() -> int:
     web_port = int(os.getenv("E2E_WEB_PORT", "3000"))
     api_url = f"http://{api_host}:{api_port}"
     web_url = f"http://{api_host}:{web_port}"
+
+    # Auto-seed SQLite pilot database if not populated
+    from scripts.seed_pilot_db import seed_sqlite_pilot_db
+
+    db_path = ROOT_DIR / "data" / "sensorguard.db"
+    seed_sqlite_pilot_db(db_path=db_path)
 
     env_api = os.environ.copy()
     env_api.setdefault("CORS_ORIGINS", f"http://localhost:{web_port},{web_url}")

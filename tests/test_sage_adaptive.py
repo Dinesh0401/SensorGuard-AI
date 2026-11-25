@@ -90,3 +90,23 @@ def test_masked_observation_aci_and_wilson_ci():
     )
     assert len(lo_aci) == 4
     assert np.all(hi_aci >= lo_aci)
+
+
+def test_adaptive_sage_strict_causal_forward_splits_no_future_leakage():
+    """Verify forward-expanding cross-validation never allows future data to leak into earlier folds."""
+    train, cal, _ = _synthetic_heteroscedastic_split(n=300, seed=42)
+    # Ensure chronological order
+    train = train.sort_values("timestamp").reset_index(drop=True)
+
+    cfg = AdaptiveSAGEConfig(n_oof_folds=3, base_model_type="ridge")
+    model = AdaptiveSAGEForecaster(config=cfg)
+    model.fit(
+        X=train,
+        y=train["target"].to_numpy(),
+        X_cal=cal,
+        y_cal=cal["target"].to_numpy(),
+    )
+    assert hasattr(model, "causal_oof_count")
+    # For 3 folds on 240 train points, folds 1 and 2 are evaluated (2/3 of train data = 160 points)
+    assert model.causal_oof_count == 160
+    assert model.causal_oof_median > 0.0
