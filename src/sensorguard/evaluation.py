@@ -16,7 +16,6 @@ Executes and compares all pre-registered forecasting and uncertainty methods:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
