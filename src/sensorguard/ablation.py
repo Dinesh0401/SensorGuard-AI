@@ -87,6 +87,18 @@ def prepare_scenario_test_data(
             & (scenario_test["timestamp"] < t_max)
         ).to_numpy()
 
+    elif scenario == "extended_72h":
+        # Contiguous 72-hour multi-station blackout (2 stations over 3 days)
+        st_ids = sorted(scenario_test["station_id"].unique())
+        target_sts = st_ids[: min(2, len(st_ids))]
+        t_min = scenario_test["timestamp"].min() + pd.Timedelta(days=3)
+        t_max = t_min + pd.Timedelta(hours=72)
+        outage_mask = (
+            scenario_test["station_id"].isin(target_sts)
+            & (scenario_test["timestamp"] >= t_min)
+            & (scenario_test["timestamp"] < t_max)
+        ).to_numpy()
+
     # Explicitly drop all precomputed feature columns upfront so it is mathematically
     # impossible for pre-existing or poisoned values to leak into the reconstructed features.
     reconstructed_cols = [

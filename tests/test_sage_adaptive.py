@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from sensorguard.models.sage_adaptive import (
     AdaptiveSAGEConfig,
@@ -93,20 +94,113 @@ def test_masked_observation_aci_and_wilson_ci():
 
 
 def test_adaptive_sage_strict_causal_forward_splits_no_future_leakage():
-    """Verify forward-expanding cross-validation never allows future data to leak into earlier folds."""
-    train, cal, _ = _synthetic_heteroscedastic_split(n=300, seed=42)
-    # Ensure chronological order
-    train = train.sort_values("timestamp").reset_index(drop=True)
+    """Verify forward-expanding cross-validation splits complete hours, enforces embargo, and is future-invariant."""
+    rng = np.random.default_rng(123)
+    hours = pd.date_range("2025-01-01", periods=120, freq="h", tz="UTC")
+    # Construct multi-station panel sharing identical timestamps (3 stations per hour = 360 rows)
+    rows = []
+    for st in ["1", "2", "3"]:
+        pm = 12.0 + 4.0 * np.sin(np.arange(120) / 10.0) + rng.normal(0, 1.0, 120)
+        for i, t in enumerate(hours):
+            rows.append(
+                {
+                    "timestamp": t,
+                    "station_id": st,
+                    "last_pm25": pm[max(0, i - 1)],
+                    "lag_1h": pm[max(0, i - 2)],
+                    "rolling_std_6h": float(1.0 + (i % 5) * 0.2),
+                    "age_hours": 1.0,
+                    "neighbor_idw_pm25": pm[max(0, i - 1)] + 0.5,
+                    "reported": True,
+                    "target": pm[i],
+                }
+            )
+    panel = pd.DataFrame(rows).sample(frac=1.0, random_state=7).reset_index(drop=True)  # Shuffled!
 
-    cfg = AdaptiveSAGEConfig(n_oof_folds=3, base_model_type="ridge")
-    model = AdaptiveSAGEForecaster(config=cfg)
-    model.fit(
-        X=train,
-        y=train["target"].to_numpy(),
-        X_cal=cal,
-        y_cal=cal["target"].to_numpy(),
+    cfg = AdaptiveSAGEConfig(
+        n_oof_folds=3,
+        horizon_hours=1.0,
+        embargo_hours=1.0,
+        base_model_type="ridge",
     )
-    assert hasattr(model, "causal_oof_count")
-    # For 3 folds on 240 train points, folds 1 and 2 are evaluated (2/3 of train data = 160 points)
-    assert model.causal_oof_count == 160
-    assert model.causal_oof_median > 0.0
+    model_base = AdaptiveSAGEForecaster(config=cfg)
+    idx_b, res_b, pred_b, audit_b = model_base.compute_causal_oof_residuals(panel, panel["target"].to_numpy())
+
+    # 1. Complete unique timestamp splitting & embargo audit
+    assert len(audit_b) == 2
+    for fold_info in audit_b:
+        assert fold_info["same_hour_disjoint"] is True
+        assert fold_info["embargo_gap_hours"] >= 2.0  # horizon(1h) + embargo(1h)
+    # Every timestamp in fold 1 (hours 40..79) contains ALL 3 stations together
+    fold1_ts = hours[40:80]
+    fold1_mask = model_base.causal_oof_timestamps_.isin(fold1_ts)
+    assert int(fold1_mask.sum()) == 40 * 3
+
+    # 2. True Future-Perturbation Invariance Test:
+    # Massively corrupt targets and features in the future fold (hours >= 80)
+    perturbed = panel.copy()
+    future_mask = pd.to_datetime(perturbed["timestamp"], utc=True) >= hours[80]
+    perturbed.loc[future_mask, "target"] = 99999.0
+    perturbed.loc[future_mask, "last_pm25"] = -50000.0
+    perturbed.loc[future_mask, "neighbor_idw_pm25"] = 88888.0
+
+    model_pert = AdaptiveSAGEForecaster(config=cfg)
+    _idx_p, res_p, pred_p, _audit_p = model_pert.compute_causal_oof_residuals(
+        perturbed, perturbed["target"].to_numpy()
+    )
+
+    # Fold 1 OOF predictions and residuals must be BIT-FOR-BIT IDENTICAL despite corrupted future fold 2
+    np.testing.assert_allclose(pred_b[fold1_mask], pred_p[fold1_mask], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(res_b[fold1_mask], res_p[fold1_mask], rtol=0.0, atol=0.0)
+
+    # Even stronger: perturb the embargo buffer hour immediately before fold 1 (hours 38 & 39)
+    # Because embargo = horizon(1h) + embargo(1h) = 2h, hours >= 39 are purged before fold 1 starts at hour 40!
+    embargo_perturbed = panel.copy()
+    purge_mask = pd.to_datetime(embargo_perturbed["timestamp"], utc=True) >= hours[39]
+    embargo_perturbed.loc[purge_mask, "target"] = 77777.0
+    embargo_perturbed.loc[purge_mask, "last_pm25"] = -77777.0
+    embargo_perturbed.loc[purge_mask, "reported"] = True
+    # Only evaluate non-target-perturbed fold 1 (keep fold 1 features/targets intact, perturb hour 39 target!)
+    embargo_target_only = panel.copy()
+    h39_mask = pd.to_datetime(embargo_target_only["timestamp"], utc=True) == hours[39]
+    embargo_target_only.loc[h39_mask, "target"] = 77777.0
+    model_emb = AdaptiveSAGEForecaster(config=cfg)
+    _idx_e, res_e, pred_e, _ = model_emb.compute_causal_oof_residuals(
+        embargo_target_only, embargo_target_only["target"].to_numpy()
+    )
+    np.testing.assert_allclose(pred_b[fold1_mask], pred_e[fold1_mask], rtol=0.0, atol=0.0)
+    np.testing.assert_allclose(res_b[fold1_mask], res_e[fold1_mask], rtol=0.0, atol=0.0)
+
+
+def test_adaptive_sage_rejects_untrustworthy_or_noncausal_timestamps():
+    """Reject missing/NaT timestamps and causal violations across decision/feature/availability columns."""
+    train, cal, _ = _synthetic_heteroscedastic_split(n=120, seed=5)
+
+    # Missing timestamp column
+    no_ts = train.drop(columns=["timestamp"])
+    with pytest.raises(ValueError, match="trustworthy timestamps"):
+        AdaptiveSAGEForecaster().fit(no_ts, no_ts["target"].to_numpy())
+
+    # NaT timestamp entry
+    nat_ts = train.copy()
+    nat_ts.loc[nat_ts.index[0], "timestamp"] = pd.NaT
+    with pytest.raises(ValueError, match="missing or unparseable"):
+        AdaptiveSAGEForecaster().fit(nat_ts, nat_ts["target"].to_numpy())
+
+    # Future issued_at violating 1h horizon
+    bad_issued = train.copy()
+    bad_issued["issued_at"] = pd.to_datetime(bad_issued["timestamp"], utc=True)
+    with pytest.raises(ValueError, match="Causal violation: 'issued_at'"):
+        AdaptiveSAGEForecaster().fit(bad_issued, bad_issued["target"].to_numpy())
+
+    # Future feature_timestamp exceeding decision time
+    bad_feat = train.copy()
+    bad_feat["feature_timestamp"] = pd.to_datetime(bad_feat["timestamp"], utc=True) + pd.Timedelta(hours=1)
+    with pytest.raises(ValueError, match="Causal violation: 'feature_timestamp'"):
+        AdaptiveSAGEForecaster().fit(bad_feat, bad_feat["target"].to_numpy())
+
+    # Invalid target_available_at preceding observation target
+    bad_avail = train.copy()
+    bad_avail["target_available_at"] = pd.to_datetime(bad_avail["timestamp"], utc=True) - pd.Timedelta(hours=2)
+    with pytest.raises(ValueError, match="Causal violation: 'target_available_at'"):
+        AdaptiveSAGEForecaster().fit(bad_avail, bad_avail["target"].to_numpy())

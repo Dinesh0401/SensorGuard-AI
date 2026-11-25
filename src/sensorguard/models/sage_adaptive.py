@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,10 @@ class AdaptiveSAGEConfig:
     propensity_risk_weight: float = 1.0
     min_local_scale: float = 0.25
     n_oof_folds: int = 3
+    horizon_hours: float = 1.0
+    embargo_hours: float = 1.0
+    require_timestamps: bool = True
+    timestamp_col: str = "timestamp"
     random_state: int = 42
 
 
@@ -93,10 +98,219 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         self.calibrated_disagreement_p90: float = 0.0
         self.calibrated_disagreement_p95: float = 0.0
         self.resolved_disagreement_threshold: float = 8.0
+        self.causal_oof_count: int = 0
+        self.causal_oof_median: float = 1.0
+        self.causal_oof_residuals_: np.ndarray | None = None
+        self.causal_oof_predictions_: np.ndarray | None = None
+        self.causal_oof_timestamps_: pd.DatetimeIndex | None = None
+        self.causal_split_audit_: list[dict[str, Any]] = []
 
     def _get_feature_cols(self, X: pd.DataFrame) -> list[str]:
-        excluded = {"target", "station_id", "timestamp", "pm25", "reported", "source"}
+        excluded = {
+            "target",
+            "station_id",
+            "timestamp",
+            "pm25",
+            "reported",
+            "source",
+            "issued_at",
+            "decision_time",
+            "feature_timestamp",
+            "target_available_at",
+            "label_available_at",
+            "observed_at",
+            "fetched_at",
+            "received_at",
+            "target_at",
+        }
         return [c for c in X.columns if c not in excluded and pd.api.types.is_numeric_dtype(X[c])]
+
+    def _validate_and_extract_timestamps(self, X: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+        """Validate target timestamps and causality relative to decision/feature/availability times."""
+        ts_col = self.config.timestamp_col
+        if ts_col not in X.columns:
+            if self.config.require_timestamps:
+                raise ValueError(
+                    f"AdaptiveSAGE requires trustworthy timestamps in '{ts_col}' for causal splitting."
+                )
+            synthetic = pd.Series(pd.date_range("2025-01-01", periods=len(X), freq="1h", tz="UTC"))
+            return synthetic, synthetic
+
+        target_ts = pd.to_datetime(X[ts_col], utc=True, errors="coerce")
+        if target_ts.isna().any():
+            raise ValueError(
+                f"AdaptiveSAGE rejected training data containing missing or unparseable '{ts_col}' values."
+            )
+
+        horizon_td = pd.Timedelta(hours=float(self.config.horizon_hours))
+        decision_ts = target_ts - horizon_td
+
+        for dec_col in ("issued_at", "decision_time"):
+            if dec_col in X.columns:
+                parsed_dec = pd.to_datetime(X[dec_col], utc=True, errors="coerce")
+                if parsed_dec.isna().any():
+                    raise ValueError(f"AdaptiveSAGE rejected rows with invalid '{dec_col}' timestamps.")
+                if (parsed_dec > decision_ts).any():
+                    raise ValueError(
+                        f"Causal violation: '{dec_col}' exceeds forecast horizon prior to '{ts_col}'."
+                    )
+                decision_ts = parsed_dec
+
+        if "feature_timestamp" in X.columns:
+            feat_ts = pd.to_datetime(X["feature_timestamp"], utc=True, errors="coerce")
+            if feat_ts.isna().any():
+                raise ValueError("AdaptiveSAGE rejected rows with invalid 'feature_timestamp' values.")
+            if (feat_ts > decision_ts).any():
+                raise ValueError(
+                    "Causal violation: 'feature_timestamp' occurs after forecast decision time."
+                )
+
+        avail_ts = target_ts.copy()
+        for avail_col in ("target_available_at", "label_available_at"):
+            if avail_col in X.columns:
+                parsed_av = pd.to_datetime(X[avail_col], utc=True, errors="coerce")
+                if parsed_av.isna().any():
+                    raise ValueError(f"AdaptiveSAGE rejected rows with invalid '{avail_col}' timestamps.")
+                if (parsed_av < target_ts).any():
+                    raise ValueError(
+                        f"Causal violation: '{avail_col}' precedes observation target timestamp '{ts_col}'."
+                    )
+                avail_ts = parsed_av
+                break
+
+        return target_ts.reset_index(drop=True), avail_ts.reset_index(drop=True)
+
+    def compute_causal_oof_residuals(
+        self,
+        X: pd.DataFrame,
+        y: np.ndarray,
+        cols: list[str] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[dict[str, Any]]]:
+        """Compute strictly forward causal out-of-sample residuals split on complete unique timestamps.
+
+        Guarantees:
+        1. Complete unique timestamps are partitioned chronologically so multi-station
+           observations at identical timestamps are never split across train and validation.
+        2. An explicit embargo >= horizon_hours + embargo_hours separates the latest training
+           label availability time from the earliest validation target timestamp.
+        3. Predictions and residuals for any fold k depend exclusively on data strictly
+           preceding fold k minus the embargo buffer; modifying future folds has zero impact.
+        """
+        feat_cols = cols or self.feature_columns or self._get_feature_cols(X)
+        y_arr = np.asarray(y, dtype=float)
+        valid_mask = np.isfinite(y_arr)
+        X_v = X.iloc[valid_mask].reset_index(drop=True)
+        y_v = y_arr[valid_mask]
+        if len(y_v) < 10:
+            raise ValueError("AdaptiveSAGE requires at least 10 finite observations for causal OOF.")
+
+        target_ts, avail_ts = self._validate_and_extract_timestamps(X_v)
+        sort_cols = [c for c in [self.config.timestamp_col, "station_id"] if c in X_v.columns]
+        if sort_cols:
+            sort_order = (
+                X_v.assign(_sort_ts=target_ts)
+                .sort_values(["_sort_ts"] + [c for c in sort_cols if c != self.config.timestamp_col], kind="mergesort")
+                .index.to_numpy()
+            )
+            X_v = X_v.iloc[sort_order].reset_index(drop=True)
+            y_v = y_v[sort_order]
+            target_ts = target_ts.iloc[sort_order].reset_index(drop=True)
+            avail_ts = avail_ts.iloc[sort_order].reset_index(drop=True)
+
+        unique_ts = np.sort(target_ts.unique())
+        if len(unique_ts) < 3:
+            raise ValueError(
+                f"AdaptiveSAGE requires at least 3 distinct timestamps for causal splitting (got {len(unique_ts)})."
+            )
+
+        k_folds = max(3, min(self.config.n_oof_folds, len(unique_ts)))
+        ts_blocks = [b for b in np.array_split(unique_ts, k_folds) if len(b) > 0]
+        if len(ts_blocks) < 2:
+            ts_blocks = np.array_split(unique_ts, 2)
+
+        horizon_td = pd.Timedelta(hours=float(self.config.horizon_hours))
+        embargo_td = pd.Timedelta(hours=float(self.config.horizon_hours) + float(self.config.embargo_hours))
+
+        causal_eval_indices_list: list[np.ndarray] = []
+        causal_eval_res_list: list[np.ndarray] = []
+        causal_eval_pred_list: list[np.ndarray] = []
+        audit_records: list[dict[str, Any]] = []
+
+        target_arr = target_ts.to_numpy()
+        avail_arr = avail_ts.to_numpy()
+
+        for k in range(1, len(ts_blocks)):
+            val_ts_set = ts_blocks[k]
+            t_val_start = pd.Timestamp(val_ts_set[0])
+            t_val_end = pd.Timestamp(val_ts_set[-1])
+            t_val_decision_start = t_val_start - horizon_td
+            t_cutoff = t_val_start - embargo_td
+
+            train_mask = (avail_arr <= t_cutoff.to_datetime64()) & (target_arr < t_val_start.to_datetime64())
+            val_mask = (target_arr >= t_val_start.to_datetime64()) & (target_arr <= t_val_end.to_datetime64())
+
+            train_idx = np.flatnonzero(train_mask)
+            val_idx = np.flatnonzero(val_mask)
+            if len(train_idx) < 5 or len(val_idx) == 0:
+                continue
+
+            # Explicit invariant check: zero same-hour timestamp overlap & strict embargo gap
+            train_ts_unique = set(target_arr[train_idx].tolist())
+            val_ts_unique = set(target_arr[val_idx].tolist())
+            assert train_ts_unique.isdisjoint(val_ts_unique), "Same-hour timestamp leakage across fold boundary"
+            max_train_avail = pd.Timestamp(avail_arr[train_idx].max())
+            if max_train_avail.tzinfo is None:
+                max_train_avail = max_train_avail.tz_localize("UTC")
+            assert max_train_avail <= t_cutoff, "Train label availability violated causal embargo"
+
+            sub_model = self._make_base_forecaster(feat_cols)
+            sub_model.fit(X_v.iloc[train_idx][feat_cols], y_v[train_idx])
+            sub_pred = np.asarray(sub_model.predict(X_v.iloc[val_idx][feat_cols]), dtype=float)
+            e_k = np.abs(y_v[val_idx] - sub_pred)
+
+            causal_eval_indices_list.append(val_idx)
+            causal_eval_pred_list.append(sub_pred)
+            causal_eval_res_list.append(e_k)
+
+            t_val_start_utc = t_val_start.tz_localize("UTC") if t_val_start.tzinfo is None else t_val_start
+            t_val_end_utc = t_val_end.tz_localize("UTC") if t_val_end.tzinfo is None else t_val_end
+            t_dec_utc = (
+                t_val_decision_start.tz_localize("UTC")
+                if t_val_decision_start.tzinfo is None
+                else t_val_decision_start
+            )
+            audit_records.append(
+                {
+                    "fold": int(k),
+                    "train_n": int(len(train_idx)),
+                    "val_n": int(len(val_idx)),
+                    "train_unique_timestamps": int(len(train_ts_unique)),
+                    "val_unique_timestamps": int(len(val_ts_unique)),
+                    "max_train_label_avail": max_train_avail.isoformat(),
+                    "val_decision_start": t_dec_utc.isoformat(),
+                    "val_min_timestamp": t_val_start_utc.isoformat(),
+                    "val_max_timestamp": t_val_end_utc.isoformat(),
+                    "embargo_gap_hours": round(
+                        (t_val_start_utc - max_train_avail).total_seconds() / 3600.0, 2
+                    ),
+                    "same_hour_disjoint": True,
+                }
+            )
+
+        if not causal_eval_indices_list:
+            raise ValueError(
+                "Causal embargo left zero valid OOF evaluation folds; check timestamp span vs embargo_hours."
+            )
+
+        causal_idx = np.concatenate(causal_eval_indices_list)
+        causal_preds = np.concatenate(causal_eval_pred_list)
+        causal_res = np.concatenate(causal_eval_res_list)
+        self._sorted_X_oof = X_v
+        self.causal_oof_timestamps_ = pd.DatetimeIndex(target_ts.iloc[causal_idx])
+        self.causal_oof_predictions_ = causal_preds
+        self.causal_oof_residuals_ = causal_res
+        self.causal_split_audit_ = audit_records
+        return causal_idx, causal_res, causal_preds, audit_records
 
     def _determine_reported_indicator(self, X: pd.DataFrame, y: np.ndarray) -> np.ndarray:
         if "reported" in X.columns:
@@ -139,6 +353,7 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         y_cal: np.ndarray | None = None,
     ) -> AdaptiveSAGEForecaster:
         """Fit propensity, OOF local residual scale s(x), base model, and sensitivity quantiles."""
+        self._validate_and_extract_timestamps(X)
         cols = self.feature_columns or self._get_feature_cols(X)
         self.feature_columns = cols
 
@@ -161,45 +376,11 @@ class AdaptiveSAGEForecaster(BaseForecaster):
 
         X_tr = X[valid_train].reset_index(drop=True)
         y_tr = y_arr[valid_train]
-        n_tr = len(y_tr)
 
-        # 2. Strictly causal forward expanding-window out-of-sample residual estimation
-        # Order chronologically by timestamp so historical data strictly precedes future data
-        if "timestamp" in X_tr.columns:
-            order = np.argsort(pd.to_datetime(X_tr["timestamp"]).to_numpy())
-        else:
-            order = np.arange(n_tr)
-
-        X_tr_sorted = X_tr.iloc[order].reset_index(drop=True)
-        y_tr_sorted = y_tr[order]
-
-        # Use forward expanding folds: fold 0 is initial training history;
-        # for fold k in 1..K-1, model is trained STRICTLY on folds 0..k-1 (timestamps t < t_eval)
-        k_folds = max(2, min(self.config.n_oof_folds, n_tr // 10))
-        fold_slices = np.array_split(np.arange(n_tr), k_folds)
-
-        causal_eval_indices_list: list[np.ndarray] = []
-        causal_eval_res_list: list[np.ndarray] = []
-
-        for k in range(1, len(fold_slices)):
-            train_idx = np.concatenate(fold_slices[:k])
-            test_idx = fold_slices[k]
-            if len(train_idx) < 5 or len(test_idx) == 0:
-                continue
-            sub_model = self._make_base_forecaster(cols)
-            sub_model.fit(X_tr_sorted.iloc[train_idx][cols], y_tr_sorted[train_idx])
-            sub_pred = sub_model.predict(X_tr_sorted.iloc[test_idx][cols])
-            e_k = np.abs(y_tr_sorted[test_idx] - sub_pred)
-            causal_eval_indices_list.append(test_idx)
-            causal_eval_res_list.append(e_k)
-
-        if causal_eval_indices_list:
-            causal_idx = np.concatenate(causal_eval_indices_list)
-            causal_res = np.concatenate(causal_eval_res_list)
-        else:
-            causal_idx = np.arange(n_tr)
-            causal_res = np.full(n_tr, 1.0, dtype=float)
-
+        # 2. Strictly causal timestamp-boundary forward expanding-window OOF residual estimation
+        causal_idx, causal_res, _causal_preds, _audit = self.compute_causal_oof_residuals(
+            X_tr, y_tr, cols=cols
+        )
         self.causal_oof_count = len(causal_res)
         self.causal_oof_median = float(np.median(causal_res)) if len(causal_res) > 0 else 1.0
 
@@ -208,7 +389,7 @@ class AdaptiveSAGEForecaster(BaseForecaster):
         self.min_scale = max(self.config.min_local_scale, 0.15)
         self.max_scale = max(self.min_scale * 4.0, 6.0 * max(med_oof, 0.5))
         log_targets = np.log(np.clip(causal_res, self.min_scale, self.max_scale))
-        self.scale_model.fit(X_tr_sorted.iloc[causal_idx][cols], log_targets)
+        self.scale_model.fit(self._sorted_X_oof.iloc[causal_idx][cols], log_targets)
         self._scale_fitted = True
 
         # 4. Fit full point forecaster on training split
