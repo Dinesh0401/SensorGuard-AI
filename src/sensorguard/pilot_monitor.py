@@ -1,9 +1,11 @@
-"""Durable multi-worker pilot quota guard, distributed lease, kill-switch, and reconciliation (M7.5 / M8.1).
+"""Durable multi-worker pilot quota guard, renewable fencing leases, kill-switch, and reconciliation (M8.1 / M8.6).
 
-Provides PostgreSQL/SQLite-backed daily request budgets with atomic conditional updates,
-single-leader polling leases with crash TTL recovery, fail-closed kill switches,
-idempotent bounded-window reconciliation (preserving append-only observation revisions),
-provider 429 backoff recovery, durable audit trails, and delayed-label calibration tracking.
+Provides:
+- Database-backed UTC daily request budget consumed on EVERY outbound HTTP attempt (including retries, 429, 5xx, timeouts)
+- Single-leader renewable leases with monotonic fencing tokens and commit-time ownership fencing
+- Unconditional fail-closed environment & operator-authorized database kill switches (no bypass flags)
+- Idempotent bounded-window reconciliation preserving append-only observation revisions
+- Durable ingestion audit trails and delayed ground-truth matching
 """
 
 from __future__ import annotations
@@ -12,7 +14,9 @@ import json
 import logging
 import os
 import socket
+import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -34,17 +38,23 @@ from sensorguard.db.schema import (
 )
 from sensorguard.ingest import IngestionPipeline
 from sensorguard.models.sage_adaptive import compute_wilson_ci
-from sensorguard.providers import OpenAQClient
+from sensorguard.providers import OpenAQClient, QuotaExhaustedError
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONTROL_NAME = "openaq_live_polling"
 DEFAULT_LEASE_NAME = "openaq_hourly_poll"
+_ATTEMPT_LOCK = threading.Lock()
 
 
 @dataclass
 class BoundedPilotConfig:
-    """Strictly bounded, fail-closed configuration for periodic live/shadow pilot polling."""
+    """Strictly bounded, fail-closed configuration for periodic shadow/live pilot polling.
+
+    Operator authorization in PilotControlState (kill_switch_active=False, opt_in_enabled=True,
+    authorized_at not None, non-default operator identity) is enforced unconditionally; no
+    bypass toggle is permitted.
+    """
 
     opt_in_enabled: bool = False
     allowed_location_ids: tuple[int, ...] = (141, 153, 154, 157, 698, 804, 1795, 2312)
@@ -52,18 +62,27 @@ class BoundedPilotConfig:
     max_pages_per_sensor: int = 1
     page_size: int = 100
     max_requests_per_day: int = 48
+    max_retries_per_request: int = 1
     stale_threshold_hours: float = 12.0
     caution_threshold_hours: float = 3.0
     lease_name: str = DEFAULT_LEASE_NAME
     lease_ttl_seconds: int = 300
     worker_id: str | None = None
     data_mode: str = "shadow_live"
-    require_db_unlock_for_live: bool = True
+
+
+@dataclass(frozen=True)
+class LeaseAcquisition:
+    """Result of attempting to acquire a distributed polling leader lease with fencing token."""
+
+    acquired: bool
+    recovered_from_expired_lease: bool
+    fencing_token: int | None
 
 
 @dataclass
 class PilotQuotaTracker:
-    """In-memory UTC daily request budget tracker (also mirrors checks alongside DB quota)."""
+    """In-memory UTC daily request budget tracker (mirrors atomic DB attempts when supplied)."""
 
     max_requests_per_day: int = 48
     current_day: str = field(default_factory=lambda: datetime.now(UTC).strftime("%Y-%m-%d"))
@@ -100,7 +119,7 @@ def _default_worker_id() -> str:
 
 
 class DurablePilotQuotaTracker:
-    """Database-backed UTC daily API request budget safe across concurrent workers and restarts."""
+    """Database-backed UTC daily API request budget safe across concurrent workers, retries, and restarts."""
 
     def __init__(self, provider: str = "openaq", max_requests_per_day: int = 48) -> None:
         self.provider = provider
@@ -129,14 +148,12 @@ class DurablePilotQuotaTracker:
                 session.flush()
             return new_row
         except IntegrityError:
-            # Concurrent worker inserted today's row simultaneously; re-select cleanly
-            existing = session.scalars(
+            return session.scalars(
                 select(PilotQuotaState).where(
                     PilotQuotaState.provider == self.provider,
                     PilotQuotaState.budget_date_utc == day_str,
                 )
             ).one()
-            return existing
 
     def get_usage(self, session: Session, now_utc: datetime | None = None) -> tuple[int, int]:
         """Return (requests_used, requests_remaining) for current UTC day."""
@@ -160,7 +177,7 @@ class DurablePilotQuotaTracker:
         count: int = 1,
         now_utc: datetime | None = None,
     ) -> bool:
-        """Atomically consume `count` requests in SQL without race overshoot."""
+        """Atomically reserve/consume `count` HTTP attempt units in SQL before wire I/O."""
         if count <= 0:
             return True
         now = _utc(now_utc) or datetime.now(UTC)
@@ -192,13 +209,10 @@ def acquire_poll_lease(
     lease_name: str = DEFAULT_LEASE_NAME,
     ttl_seconds: int = 300,
     now_utc: datetime | None = None,
-) -> tuple[bool, bool]:
-    """Atomically acquire single-leader polling lease across distributed workers.
-
-    Returns (acquired, recovered_from_expired_lease).
-    """
+) -> LeaseAcquisition:
+    """Atomically acquire single-leader polling lease with monotonically increasing fencing token."""
     now = _utc(now_utc) or datetime.now(UTC)
-    expires = now + timedelta(seconds=max(10, ttl_seconds))
+    expires = now + timedelta(seconds=max(5, ttl_seconds))
 
     row = session.scalars(select(PilotPollLease).where(PilotPollLease.lease_name == lease_name)).first()
     if row is None:
@@ -208,6 +222,7 @@ def acquire_poll_lease(
                     PilotPollLease(
                         lease_name=lease_name,
                         holder_id=holder_id,
+                        fencing_token=1,
                         acquired_at=now,
                         heartbeat_at=now,
                         expires_at=expires,
@@ -216,30 +231,22 @@ def acquire_poll_lease(
                 )
                 session.flush()
             session.commit()
-            return True, False
+            return LeaseAcquisition(acquired=True, recovered_from_expired_lease=False, fencing_token=1)
         except IntegrityError:
             row = session.scalars(select(PilotPollLease).where(PilotPollLease.lease_name == lease_name)).one()
 
     existing_exp = _utc(row.expires_at)
-    was_expired_dirty = bool(
-        row.holder_id is not None
-        and row.holder_id != holder_id
-        and existing_exp is not None
-        and existing_exp <= now
-    )
+    was_expired_dirty = bool(row.holder_id is not None and existing_exp is not None and existing_exp <= now)
 
     stmt = (
         update(PilotPollLease)
         .where(
             PilotPollLease.id == row.id,
-            (
-                PilotPollLease.holder_id.is_(None)
-                | (PilotPollLease.expires_at <= now)
-                | (PilotPollLease.holder_id == holder_id)
-            ),
+            PilotPollLease.holder_id.is_(None) | (PilotPollLease.expires_at <= now),
         )
         .values(
             holder_id=holder_id,
+            fencing_token=PilotPollLease.fencing_token + 1,
             acquired_at=now,
             heartbeat_at=now,
             expires_at=expires,
@@ -251,23 +258,88 @@ def acquire_poll_lease(
     session.commit()
     session.expire(row)
     acquired = int(res.rowcount or 0) == 1
-    return acquired, bool(acquired and was_expired_dirty)
+    if not acquired:
+        return LeaseAcquisition(acquired=False, recovered_from_expired_lease=False, fencing_token=None)
+
+    fresh = session.scalars(select(PilotPollLease).where(PilotPollLease.id == row.id)).one()
+    return LeaseAcquisition(
+        acquired=True,
+        recovered_from_expired_lease=was_expired_dirty,
+        fencing_token=int(fresh.fencing_token),
+    )
 
 
-def release_poll_lease(
+def renew_poll_lease(
     session: Session,
     holder_id: str,
+    fencing_token: int,
     lease_name: str = DEFAULT_LEASE_NAME,
+    ttl_seconds: int = 300,
     now_utc: datetime | None = None,
 ) -> bool:
-    """Release leader lease held by `holder_id` cleanly."""
+    """Renew lease TTL ONLY if holder_id, fencing_token, and unexpired lease still match."""
     now = _utc(now_utc) or datetime.now(UTC)
+    new_exp = now + timedelta(seconds=max(5, ttl_seconds))
     stmt = (
         update(PilotPollLease)
         .where(
             PilotPollLease.lease_name == lease_name,
             PilotPollLease.holder_id == holder_id,
+            PilotPollLease.fencing_token == fencing_token,
+            PilotPollLease.expires_at > now,
         )
+        .values(
+            heartbeat_at=now,
+            expires_at=new_exp,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    res = session.execute(stmt)
+    session.commit()
+    return int(res.rowcount or 0) == 1
+
+
+def verify_fencing_token(
+    session: Session,
+    holder_id: str,
+    fencing_token: int,
+    lease_name: str = DEFAULT_LEASE_NAME,
+    now_utc: datetime | None = None,
+) -> bool:
+    """Confirm worker still holds an unexpired lease with exact matching fencing token before DB commit."""
+    now = _utc(now_utc) or datetime.now(UTC)
+    row = session.scalars(
+        select(PilotPollLease).where(
+            PilotPollLease.lease_name == lease_name,
+            PilotPollLease.holder_id == holder_id,
+            PilotPollLease.fencing_token == fencing_token,
+        )
+    ).first()
+    if row is None or row.expires_at is None:
+        return False
+    exp = _utc(row.expires_at)
+    return bool(exp is not None and exp > now)
+
+
+def release_poll_lease(
+    session: Session,
+    holder_id: str,
+    fencing_token: int | None = None,
+    lease_name: str = DEFAULT_LEASE_NAME,
+    now_utc: datetime | None = None,
+) -> bool:
+    """Release leader lease held by `holder_id` (and exact `fencing_token` when supplied)."""
+    now = _utc(now_utc) or datetime.now(UTC)
+    conditions = [
+        PilotPollLease.lease_name == lease_name,
+        PilotPollLease.holder_id == holder_id,
+    ]
+    if fencing_token is not None:
+        conditions.append(PilotPollLease.fencing_token == fencing_token)
+    stmt = (
+        update(PilotPollLease)
+        .where(*conditions)
         .values(
             holder_id=None,
             expires_at=None,
@@ -297,7 +369,8 @@ def ensure_default_control_state(
         control_name=control_name,
         kill_switch_active=True,
         opt_in_enabled=False,
-        reason="Default fail-closed lock pending operator live-pilot authorization.",
+        authorized_at=None,
+        reason="Default fail-closed lock pending explicit operator authorization.",
         updated_by="system_default",
         updated_at=now,
     )
@@ -322,7 +395,11 @@ def set_polling_kill_switch(
     control_name: str = DEFAULT_CONTROL_NAME,
     now_utc: datetime | None = None,
 ) -> PilotControlState:
-    """Set durable kill-switch and opt-in flags cleanly in database storage."""
+    """Set durable kill-switch and explicit operator authorization cleanly."""
+    clean_actor = str(updated_by or "").strip()
+    if not kill_switch_active and clean_actor in {"", "system_default"}:
+        raise ValueError("Non-default operator identity required to authorize polling.")
+
     now = _utc(now_utc) or datetime.now(UTC)
     row = ensure_default_control_state(session, control_name=control_name, now_utc=now)
     row.kill_switch_active = bool(kill_switch_active)
@@ -330,8 +407,14 @@ def set_polling_kill_switch(
         row.opt_in_enabled = bool(opt_in_enabled)
     elif kill_switch_active:
         row.opt_in_enabled = False
+
+    if not row.kill_switch_active and row.opt_in_enabled:
+        row.authorized_at = now
+    else:
+        row.authorized_at = None
+
     row.reason = reason or row.reason
-    row.updated_by = updated_by
+    row.updated_by = clean_actor or "operator"
     row.updated_at = now
     session.commit()
     session.refresh(row)
@@ -343,11 +426,7 @@ def inspect_station_provider_metadata(
     reference_time: datetime | None = None,
     recent_threshold_hours: float = 48.0,
 ) -> dict[str, Any]:
-    """Audit station licenses, provider sensor IDs, and last upstream metadata timestamp (offline-safe).
-
-    Does NOT make external HTTP calls; reports solely from stored database metadata so
-    Q1 2024 historical completeness is never conflated with current live availability.
-    """
+    """Audit station licenses, provider sensor IDs, and last upstream metadata timestamp (offline-safe)."""
     ref_utc = _utc(reference_time) or datetime.now(UTC)
     stations = list(session.scalars(select(Station).order_by(Station.id.asc())).all())
     station_audits: list[dict[str, Any]] = []
@@ -491,10 +570,12 @@ def _record_audit_run(
     started_at: datetime,
     finished_at: datetime,
     status: str,
+    fencing_token: int | None = None,
     window_from: datetime | None = None,
     window_to: datetime | None = None,
     sensors_polled: int = 0,
     requests_consumed: int = 0,
+    http_attempts: int = 0,
     records_fetched: int = 0,
     records_inserted: int = 0,
     records_revised: int = 0,
@@ -506,6 +587,7 @@ def _record_audit_run(
     audit = PilotIngestAuditRun(
         provider="openaq",
         worker_id=worker_id,
+        fencing_token=fencing_token,
         started_at=started_at,
         finished_at=finished_at,
         status=status,
@@ -513,6 +595,7 @@ def _record_audit_run(
         window_to=window_to,
         sensors_polled=sensors_polled,
         requests_consumed=requests_consumed,
+        http_attempts=http_attempts,
         records_fetched=records_fetched,
         records_inserted=records_inserted,
         records_revised=records_revised,
@@ -533,45 +616,40 @@ def run_bounded_opt_in_poll(
     api_key: str | None = None,
     transport: httpx.BaseTransport | None = None,
     now_utc: datetime | None = None,
+    lease_clock: Callable[[], datetime] | None = None,
 ) -> dict[str, Any]:
-    """Execute a strictly opt-in, durable quota-bounded, leader-leased OpenAQ reconciliation poll.
-
-    Guards enforced on every run:
-    1. Environment kill switch (`SENSORGUARD_POLLING_KILL_SWITCH=true`) -> SKIPPED_KILL_SWITCH.
-    2. Durable DB kill switch (`PilotControlState.kill_switch_active=True`) -> SKIPPED_KILL_SWITCH.
-    3. Config opt-in gate (`config.opt_in_enabled=False`) -> SKIPPED_OPT_OUT.
-    4. Double-key DB unlock requirement for real network polls (`transport is None`) unless
-       `PilotControlState.opt_in_enabled=True` & `kill_switch_active=False`.
-    5. Atomic PostgreSQL/SQLite leader lease (`PilotPollLease`) preventing duplicate worker runs.
-    6. Atomic database UTC daily quota (`PilotQuotaState`) persistent across process restarts.
-    """
+    """Execute an authorized, per-attempt quota-bounded, renewable-fenced OpenAQ poll."""
     now = _utc(now_utc) or datetime.now(UTC)
     started_at = now
     worker_id = config.worker_id or _default_worker_id()
     db_quota = DurablePilotQuotaTracker(provider="openaq", max_requests_per_day=config.max_requests_per_day)
 
+    def _current_clock() -> datetime:
+        if lease_clock is not None:
+            return _utc(lease_clock()) or now
+        return _utc(now_utc) or datetime.now(UTC)
+
     def _quota_snapshot(sess: Session) -> tuple[int, int]:
-        db_used, db_rem = db_quota.get_usage(sess, now)
+        check_now = _current_clock()
+        db_used, db_rem = db_quota.get_usage(sess, check_now)
         if quota is not None:
             used = max(db_used, quota.requests_used)
-            rem = min(db_rem, quota.remaining(now))
+            rem = min(db_rem, quota.remaining(check_now))
             return used, max(0, rem)
         return db_used, db_rem
 
     with session_factory() as session:
-        # 1. Fail-closed Kill-Switch checks (env var OR durable DB kill-switch)
+        # 1. Fail-closed Kill-Switch & Operator Authorization gates (unconditional, no bypass)
         env_kill = os.getenv("SENSORGUARD_POLLING_KILL_SWITCH", "false").lower() in {"1", "true", "yes"}
-        ctrl = session.scalars(
-            select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
-        ).first()
-        db_kill = bool(ctrl is not None and ctrl.kill_switch_active)
-        db_unlocked = bool(ctrl is not None and (not ctrl.kill_switch_active) and ctrl.opt_in_enabled)
+        ctrl = ensure_default_control_state(session, now_utc=now)
+        operator_authorized = bool(
+            (not ctrl.kill_switch_active)
+            and ctrl.opt_in_enabled
+            and ctrl.authorized_at is not None
+            and ctrl.updated_by not in {None, "", "system_default"}
+        )
 
-        if (
-            env_kill
-            or db_kill
-            or (transport is None and config.require_db_unlock_for_live and not db_unlocked)
-        ):
+        if env_kill or not operator_authorized:
             staleness = audit_station_staleness(
                 session,
                 reference_time=now,
@@ -582,7 +660,7 @@ def run_bounded_opt_in_poll(
             reason = (
                 "Environment SENSORGUARD_POLLING_KILL_SWITCH active."
                 if env_kill
-                else "Durable PilotControlState kill-switch active or DB opt-in locked."
+                else "Durable PilotControlState kill-switch active or missing explicit operator authorization."
             )
             _record_audit_run(
                 session,
@@ -598,6 +676,7 @@ def run_bounded_opt_in_poll(
                 "worker_id": worker_id,
                 "requests_used_today": used,
                 "requests_remaining": rem,
+                "http_attempts": 0,
                 "records_fetched": 0,
                 "records_persisted": 0,
                 "records_revised": 0,
@@ -626,6 +705,7 @@ def run_bounded_opt_in_poll(
                 "worker_id": worker_id,
                 "requests_used_today": used,
                 "requests_remaining": rem,
+                "http_attempts": 0,
                 "records_fetched": 0,
                 "records_persisted": 0,
                 "records_revised": 0,
@@ -655,21 +735,22 @@ def run_bounded_opt_in_poll(
                 "worker_id": worker_id,
                 "requests_used_today": used,
                 "requests_remaining": rem,
+                "http_attempts": 0,
                 "records_fetched": 0,
                 "records_persisted": 0,
                 "records_revised": 0,
                 "staleness": staleness,
             }
 
-        # 2. Single-leader distributed polling lease
-        lease_ok, recovered_expired = acquire_poll_lease(
+        # 2. Single-leader distributed polling lease with monotonic fencing token
+        lease_acq = acquire_poll_lease(
             session,
             holder_id=worker_id,
             lease_name=config.lease_name,
             ttl_seconds=config.lease_ttl_seconds,
-            now_utc=now,
+            now_utc=_current_clock(),
         )
-        if not lease_ok:
+        if not lease_acq.acquired or lease_acq.fencing_token is None:
             staleness = audit_station_staleness(
                 session,
                 reference_time=now,
@@ -691,12 +772,15 @@ def run_bounded_opt_in_poll(
                 "worker_id": worker_id,
                 "requests_used_today": used,
                 "requests_remaining": rem,
+                "http_attempts": 0,
                 "records_fetched": 0,
                 "records_persisted": 0,
                 "records_revised": 0,
                 "staleness": staleness,
             }
 
+        my_fencing_token = lease_acq.fencing_token
+        recovered_expired = lease_acq.recovered_from_expired_lease
         window_dt_from = now - timedelta(hours=config.lookback_hours)
         window_from = window_dt_from.strftime("%Y-%m-%dT%H:%M:%SZ")
         window_to = now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -707,10 +791,26 @@ def run_bounded_opt_in_poll(
         dedup_total = 0
         invalid_total = 0
         sensors_polled = 0
-        requests_this_run = 0
+        exact_http_attempts = 0
         quota_halted = False
         rate_limited_429 = False
+        stale_fencing_abort = False
         error_msg: str | None = None
+
+        def _reserve_single_http_attempt(_method: str, _endpoint: str, _attempt_idx: int) -> None:
+            nonlocal exact_http_attempts
+            attempt_ts = _current_clock()
+            with _ATTEMPT_LOCK:
+                if quota is not None and quota.remaining(attempt_ts) < 1:
+                    raise QuotaExhaustedError("In-memory PilotQuotaTracker daily limit reached.")
+                with session_factory() as q_sess:
+                    if not db_quota.try_consume(q_sess, count=1, now_utc=attempt_ts):
+                        raise QuotaExhaustedError(
+                            f"Durable daily OpenAQ quota exhausted (cap={config.max_requests_per_day})."
+                        )
+                if quota is not None:
+                    quota.try_consume(1, attempt_ts)
+                exact_http_attempts += 1
 
         try:
             sensors = list(
@@ -728,29 +828,32 @@ def run_bounded_opt_in_poll(
             client = OpenAQClient(
                 api_key=resolved_key or "mock-test-key",
                 transport=transport,
-                max_retries=1,
-                base_backoff_seconds=0.05 if transport is not None else 0.5,
+                max_retries=config.max_retries_per_request,
+                base_backoff_seconds=0.02 if transport is not None else 0.5,
+                attempt_guard=_reserve_single_http_attempt,
             )
             pipeline = IngestionPipeline(session)
 
             for sensor in sensors:
-                # Enforce BOTH DB durable quota and optional caller tracker atomically
-                if quota is not None and quota.remaining(now) < config.max_pages_per_sensor:
-                    quota_halted = True
-                    break
-
-                if not db_quota.try_consume(session, count=config.max_pages_per_sensor, now_utc=now):
-                    quota_halted = True
-                    logger.warning(
-                        "Durable daily OpenAQ quota exhausted (cap=%d). Halting poll.",
-                        config.max_requests_per_day,
+                # Heartbeat renewal + ownership fencing before every sensor batch
+                with session_factory() as l_sess:
+                    renewed = renew_poll_lease(
+                        l_sess,
+                        holder_id=worker_id,
+                        fencing_token=my_fencing_token,
+                        lease_name=config.lease_name,
+                        ttl_seconds=config.lease_ttl_seconds,
+                        now_utc=_current_clock(),
                     )
+                if not renewed:
+                    stale_fencing_abort = True
+                    error_msg = (
+                        f"Lost lease ownership before polling sensor {sensor.provider_sensor_id} "
+                        f"(stale fencing_token={my_fencing_token})."
+                    )
+                    session.rollback()
                     break
 
-                if quota is not None:
-                    quota.try_consume(config.max_pages_per_sensor, now)
-
-                requests_this_run += config.max_pages_per_sensor
                 try:
                     res = pipeline.ingest_sensor_hours(
                         sensor_db_id=sensor.id,
@@ -760,6 +863,7 @@ def run_bounded_opt_in_poll(
                         datetime_to=window_to,
                         max_pages=config.max_pages_per_sensor,
                         page_size=config.page_size,
+                        auto_commit=False,
                     )
                     fetched_total += res.records_fetched
                     persisted_total += res.records_inserted
@@ -767,6 +871,11 @@ def run_bounded_opt_in_poll(
                     dedup_total += res.records_deduplicated
                     invalid_total += res.records_invalid
                     sensors_polled += 1
+                except QuotaExhaustedError as q_exc:
+                    quota_halted = True
+                    error_msg = str(q_exc)
+                    logger.warning("Per-attempt quota exhausted: %s", error_msg)
+                    break
                 except httpx.HTTPStatusError as http_exc:
                     if http_exc.response is not None and http_exc.response.status_code == 429:
                         rate_limited_429 = True
@@ -775,13 +884,41 @@ def run_bounded_opt_in_poll(
                         break
                     error_msg = str(http_exc)
                     raise
-                except Exception as exc:
-                    error_msg = str(exc)
-                    raise
 
-            session.commit()
+            # Final commit-time fencing gate: refuse stale commit if another worker took over lease!
+            if not stale_fencing_abort:
+                with session_factory() as fence_sess:
+                    fence_valid = verify_fencing_token(
+                        fence_sess,
+                        holder_id=worker_id,
+                        fencing_token=my_fencing_token,
+                        lease_name=config.lease_name,
+                        now_utc=_current_clock(),
+                    )
+                if not fence_valid:
+                    stale_fencing_abort = True
+                    error_msg = (
+                        f"Commit aborted by ownership fence: lease expired or preempted "
+                        f"(stale fencing_token={my_fencing_token})."
+                    )
+                    session.rollback()
+                    fetched_total = 0
+                    persisted_total = 0
+                    revised_total = 0
+                    dedup_total = 0
+                    invalid_total = 0
+
+            if not stale_fencing_abort:
+                session.commit()
+
             final_status = (
-                "HTTP_429_BACKOFF" if rate_limited_429 else ("QUOTA_EXHAUSTED" if quota_halted else "SUCCESS")
+                "SKIPPED_STALE_FENCING_TOKEN"
+                if stale_fencing_abort
+                else (
+                    "HTTP_429_BACKOFF"
+                    if rate_limited_429
+                    else ("QUOTA_EXHAUSTED" if quota_halted else "SUCCESS")
+                )
             )
             staleness = audit_station_staleness(
                 session,
@@ -793,13 +930,15 @@ def run_bounded_opt_in_poll(
             _record_audit_run(
                 session,
                 worker_id=worker_id,
+                fencing_token=my_fencing_token,
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
                 status=final_status,
                 window_from=window_dt_from,
                 window_to=now,
                 sensors_polled=sensors_polled,
-                requests_consumed=requests_this_run,
+                requests_consumed=exact_http_attempts,
+                http_attempts=exact_http_attempts,
                 records_fetched=fetched_total,
                 records_inserted=persisted_total,
                 records_revised=revised_total,
@@ -812,12 +951,14 @@ def run_bounded_opt_in_poll(
                 "status": final_status,
                 "polled_at": now.isoformat(),
                 "worker_id": worker_id,
+                "fencing_token": my_fencing_token,
                 "recovered_from_expired_lease": recovered_expired,
                 "window_from": window_from,
                 "window_to": window_to,
                 "sensors_polled": sensors_polled,
                 "requests_used_today": used,
                 "requests_remaining": rem,
+                "http_attempts": exact_http_attempts,
                 "records_fetched": fetched_total,
                 "records_inserted": persisted_total,
                 "records_persisted": persisted_total,
@@ -832,13 +973,15 @@ def run_bounded_opt_in_poll(
             _record_audit_run(
                 session,
                 worker_id=worker_id,
+                fencing_token=my_fencing_token,
                 started_at=started_at,
                 finished_at=datetime.now(UTC),
                 status="FAILED",
                 window_from=window_dt_from,
                 window_to=now,
                 sensors_polled=sensors_polled,
-                requests_consumed=requests_this_run,
+                requests_consumed=exact_http_attempts,
+                http_attempts=exact_http_attempts,
                 records_fetched=fetched_total,
                 records_inserted=persisted_total,
                 records_revised=revised_total,
@@ -849,10 +992,23 @@ def run_bounded_opt_in_poll(
             )
             raise
         finally:
-            try:
-                release_poll_lease(session, holder_id=worker_id, lease_name=config.lease_name, now_utc=now)
-            except Exception:
-                logger.exception("Failed releasing lease '%s' for worker '%s'", config.lease_name, worker_id)
+            if not stale_fencing_abort:
+                try:
+                    with session_factory() as rel_sess:
+                        release_poll_lease(
+                            rel_sess,
+                            holder_id=worker_id,
+                            fencing_token=my_fencing_token,
+                            lease_name=config.lease_name,
+                            now_utc=_current_clock(),
+                        )
+                except Exception:
+                    logger.exception(
+                        "Failed releasing fenced lease '%s' token=%s for worker '%s'",
+                        config.lease_name,
+                        my_fencing_token,
+                        worker_id,
+                    )
 
 
 def reconcile_delayed_ground_truth(
@@ -860,12 +1016,7 @@ def reconcile_delayed_ground_truth(
     run_id: int | None = None,
     delay_threshold_hours: float = 1.5,
 ) -> dict[str, Any]:
-    """Reconcile persisted ForecastRecord rows against arrived Observation truth labels.
-
-    Explicitly separates arrived ground truth (on-time vs delayed) from still-missing
-    ground truth (`unmatched_missing_truth_count`), computing empirical PICP and MPIW
-    only across matched predictions and flagging potential MNAR label censoring.
-    """
+    """Reconcile persisted ForecastRecord rows against arrived Observation truth labels."""
     stmt = select(ForecastRecord).order_by(ForecastRecord.decision_cutoff.asc())
     if run_id is not None:
         stmt = stmt.where(ForecastRecord.run_id == run_id)
@@ -889,7 +1040,6 @@ def reconcile_delayed_ground_truth(
     sensor_ids = sorted({f.sensor_id for f in forecasts})
     target_times = sorted({_utc(f.target_time) for f in forecasts if f.target_time is not None})
 
-    # Load latest VALID version per (sensor_id, observed_at)
     obs_rows = list(
         session.scalars(
             select(Observation)

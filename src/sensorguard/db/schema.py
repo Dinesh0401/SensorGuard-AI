@@ -218,9 +218,25 @@ class ForecastRun(Base):
     dataset_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     algorithm: Mapped[str] = mapped_column(String(64), nullable=False, default="SAGE-LIGHTGBM")
     execution_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="serving")
+    evaluation_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="serving")
     data_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="archived_historical")
+    model_created_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    artifact_immutable_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True, index=True)
     nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
     issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+        index=True,
+    )
+    persisted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         nullable=False,
@@ -265,6 +281,16 @@ class ForecastRecord(Base):
     newest_source_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feature_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     scenario_bounds_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    persisted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -274,6 +300,10 @@ class ForecastRecord(Base):
     run: Mapped[ForecastRun] = relationship("ForecastRun", back_populates="forecasts")
     station: Mapped[Station] = relationship("Station")
     sensor: Mapped[Sensor] = relationship("Sensor")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "station_id", "target_time", name="uq_forecasts_run_station_target"),
+    )
 
 
 class PilotQuotaState(Base):
@@ -303,6 +333,7 @@ class PilotPollLease(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     lease_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     holder_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     acquired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
@@ -322,6 +353,7 @@ class PilotControlState(Base):
     control_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     kill_switch_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     opt_in_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -339,6 +371,7 @@ class PilotIngestAuditRun(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     provider: Mapped[str] = mapped_column(String(64), nullable=False, default="openaq")
     worker_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    fencing_token: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     finished_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
@@ -346,6 +379,7 @@ class PilotIngestAuditRun(Base):
     window_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sensors_polled: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     requests_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    http_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_inserted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     records_revised: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -353,3 +387,22 @@ class PilotIngestAuditRun(Base):
     records_invalid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     recovered_from_expired_lease: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PilotApiRateLimit(Base):
+    """Server-side durable fixed-window API rate limit shared independently across workers."""
+
+    __tablename__ = "pilot_api_rate_limits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    window_minute_utc: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_requests: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    __table_args__ = (UniqueConstraint("scope", "window_minute_utc", name="uq_pilot_api_rate_scope_window"),)

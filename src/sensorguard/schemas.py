@@ -57,6 +57,8 @@ class ShadowModelSummary(BaseModel):
     algorithm: str
     serving_role: str
     promoted_to_primary: bool
+    model_created_at: str | None = None
+    artifact_immutable_ref: str | None = None
     promotion_status_note: str
 
 
@@ -79,6 +81,8 @@ class ModelStatusResponse(BaseModel):
         "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). "
         "AdaptiveSAGEForecaster runs offline/shadow only."
     )
+    model_created_at: str | None = None
+    artifact_immutable_ref: str | None = None
     shadow_models: list[ShadowModelSummary] = Field(default_factory=list)
     operational_data_mode: str = "archived_historical"
     extra: dict[str, Any] | None = None
@@ -164,6 +168,7 @@ class ForecastRecord(BaseModel):
     is_stale: bool = Field(..., description="True if forecast is based on stale sensor history")
     scenario_bounds: list[ForecastScenarioBounds] = Field(default_factory=list)
     feature_hash: str | None = None
+    generated_at: datetime | None = None
 
 
 class StationForecastsResponse(BaseModel):
