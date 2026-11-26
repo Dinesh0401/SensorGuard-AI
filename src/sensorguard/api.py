@@ -172,12 +172,32 @@ def get_db():
         session.close()
 
 
+def _is_isolated_dev_rate_limit_fallback_allowed(bind: Any) -> bool:
+    """Permit process-local fallback ONLY in explicitly isolated SQLite dev/test mode."""
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "").lower()
+    if dialect_name != "sqlite":
+        return False
+    allow_flag = os.getenv("SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    env_mode = os.getenv("SENSORGUARD_ENV", "production").lower()
+    return bool(allow_flag and env_mode in {"development", "dev_test", "test"})
+
+
 def _enforce_server_rate_limit(
     scope: str,
     max_requests_per_min: int,
     db: Session | None = None,
 ) -> None:
-    """Enforce server-side fixed-window API rate limits across workers via durable DB counters."""
+    """Enforce server-side fixed-window API rate limits across workers via durable DB counters.
+
+    Fails closed with HTTP 503 whenever the durable DB rate limiter fails in staging,
+    production, PostgreSQL, or default configurations. In-memory fallback is permitted ONLY
+    when SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV=true AND SENSORGUARD_ENV in
+    {'development', 'dev_test', 'test'} on an isolated SQLite bind.
+    """
     if max_requests_per_min < 1:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -243,8 +263,24 @@ def _enforce_server_rate_limit(
                 return
         except HTTPException:
             raise
-        except SQLAlchemyError:
-            # Fallback for un-migrated SQLite fixtures missing pilot_api_rate_limits table
+        except SQLAlchemyError as exc:
+            dialect_name = getattr(getattr(bind, "dialect", None), "name", "unknown")
+            logger.error(
+                "RATE_LIMIT_DB_FAILURE scope=%s dialect=%s error=%s",
+                scope,
+                dialect_name,
+                exc,
+            )
+            if not _is_isolated_dev_rate_limit_fallback_allowed(bind):
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=(
+                        f"Service unavailable: durable rate limiter failure for '{scope}'; "
+                        "failing closed without in-memory fallback."
+                    ),
+                    headers={"Retry-After": "10"},
+                ) from exc
+
             stale_keys = [k for k in _FALLBACK_RATE_WINDOWS if k[1] != window_key]
             for sk in stale_keys:
                 _FALLBACK_RATE_WINDOWS.pop(sk, None)
@@ -712,15 +748,19 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
         db.rollback()
 
     try:
-        shadow_summary = reconcile_shadow_evaluation(db, min_matched_outcomes=100, min_unique_hours=24)
+        shadow_summary = reconcile_shadow_evaluation(
+            db, min_matched_outcomes=100, min_unique_hours=24, min_lead_seconds=300.0
+        )
     except SQLAlchemyError:
         db.rollback()
         shadow_summary = {
-            "status": "SCHEMA_007_NOT_APPLIED_OFFLINE",
+            "status": "SCHEMA_008_NOT_APPLIED_OFFLINE",
             "calibration_claim_eligible": False,
             "adaptive_sage_promotion_eligible": False,
+            "artifact_integrity_verified": False,
             "min_matched_outcomes_required": 100,
             "min_unique_hours_required": 24,
+            "min_lead_seconds_required": 300.0,
             "models": {},
         }
 

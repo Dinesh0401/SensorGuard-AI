@@ -45,6 +45,14 @@ def main() -> int:
     if not db_path.exists() or db_path.stat().st_size == 0:
         seed_sqlite_pilot_db(db_path=db_path)
 
+    # Ensure seeded SQLite DB has current Alembic migrations (including pilot_api_rate_limits)
+    from alembic.config import Config
+
+    from alembic import command
+
+    alembic_cfg = Config(str(ROOT_DIR / "alembic.ini"))
+    command.upgrade(alembic_cfg, "head")
+
     env_api = os.environ.copy()
     env_api.setdefault("CORS_ORIGINS", f"http://localhost:{web_port},{web_url}")
 
