@@ -231,6 +231,11 @@ class ForecastRun(Base):
     nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
     min_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     effective_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commit_safety_margin_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pre_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    commit_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -293,7 +298,10 @@ class ForecastRecord(Base):
     training_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     effective_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     min_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commit_safety_margin_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     available_at_decision_cutoff: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    pre_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    commit_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

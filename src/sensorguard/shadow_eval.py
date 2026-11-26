@@ -90,6 +90,7 @@ SHADOW_MODEL_SPECS: dict[str, dict[str, str]] = {
 
 _LEGACY_PLACEHOLDER_MODEL_SHA = hashlib.sha256(b"shadow-suite-m86").hexdigest()
 DEFAULT_MIN_LEAD_SECONDS = 300.0
+DEFAULT_COMMIT_SAFETY_MARGIN_SECONDS = 15.0
 
 
 def _to_utc(dt: Any) -> datetime | None:
@@ -281,15 +282,23 @@ def _generate_shadow_batch(
     data_mode: str = "shadow_live",
     idempotency_behavior: str = "return",
     min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
+    commit_safety_margin_seconds: float = DEFAULT_COMMIT_SAFETY_MARGIN_SECONDS,
     now_fn: Callable[[], datetime] | None = None,
 ) -> list[ForecastRun]:
-    """Core generator enforcing verified JSON artifacts, honest lead/persistence timestamps & DB idempotency."""
+    """Core generator enforcing verified JSON artifacts, post-commit completion proof & DB idempotency."""
     if evaluation_mode not in {"prospective_shadow", "retrospective_replay"}:
         raise ValueError(f"Unsupported evaluation_mode: {evaluation_mode}")
     if not decision_cutoffs:
         raise ValueError("decision_cutoffs cannot be empty.")
     if evaluation_mode == "prospective_shadow" and float(min_lead_seconds) <= 0.0:
         raise ValueError(f"min_lead_seconds must be strictly positive (got {min_lead_seconds}).")
+    if float(commit_safety_margin_seconds) < 0.0:
+        raise ValueError(
+            f"commit_safety_margin_seconds cannot be negative (got {commit_safety_margin_seconds})."
+        )
+    effective_margin = (
+        float(commit_safety_margin_seconds) if evaluation_mode == "prospective_shadow" else 0.0
+    )
 
     clock_fn = now_fn or (lambda: datetime.now(UTC))
     norm_cutoffs = sorted({_to_utc(tc) for tc in decision_cutoffs if _to_utc(tc) is not None})
@@ -573,15 +582,16 @@ def _generate_shadow_batch(
                     )
                 )
 
-    actual_persisted_at = _to_utc(clock_fn()) or datetime.now(UTC)
+    actual_pre_commit_at = _to_utc(clock_fn()) or datetime.now(UTC)
+    min_target = min(target_times)
     if evaluation_mode == "prospective_shadow":
-        min_target = min(target_times)
-        persist_lead_s = (min_target - actual_persisted_at).total_seconds()
-        if persist_lead_s <= 0.0 or persist_lead_s < float(min_lead_seconds):
+        pre_commit_lead_s = (min_target - actual_pre_commit_at).total_seconds()
+        required_pre_lead = float(min_lead_seconds) + effective_margin
+        if pre_commit_lead_s <= 0.0 or pre_commit_lead_s < required_pre_lead:
             session.rollback()
             raise ValueError(
-                f"Prospective commit aborted: persistence lead time {persist_lead_s:.1f}s < "
-                f"min_lead_seconds {float(min_lead_seconds):.1f}s at commit time {actual_persisted_at.isoformat()}."
+                f"Prospective commit aborted: pre-commit lead time {pre_commit_lead_s:.1f}s < "
+                f"min_lead+safety_margin {required_pre_lead:.1f}s at {actual_pre_commit_at.isoformat()}."
             )
         # Re-verify before commit that no concurrent poll persisted target truth mid-inference
         late_existing = session.scalars(
@@ -598,22 +608,26 @@ def _generate_shadow_batch(
                 "Prospective commit aborted: target observation arrived concurrently before forecast commit."
             )
 
-    min_rec_lead = round(min((tt - actual_persisted_at).total_seconds() for tt in target_times), 3)
-    for m_key in new_keys_to_insert:
-        runs_by_key[m_key].persisted_at = actual_persisted_at
-        runs_by_key[m_key].effective_lead_seconds = min_rec_lead
-        session.add(runs_by_key[m_key])
+    min_pre_lead = round(min((tt - actual_pre_commit_at).total_seconds() for tt in target_times), 3)
+    new_runs = [runs_by_key[m_key] for m_key in new_keys_to_insert]
+    for run in new_runs:
+        run.commit_safety_margin_seconds = effective_margin
+        run.pre_commit_at = actual_pre_commit_at
+        run.persisted_at = actual_pre_commit_at
+        run.effective_lead_seconds = min_pre_lead
+        session.add(run)
     for snap in pending_snapshots:
-        snap.created_at = actual_persisted_at
+        snap.created_at = actual_pre_commit_at
         session.add(snap)
     for rec in pending_records:
-        rec_target = _to_utc(rec.target_time) or actual_persisted_at
-        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_persisted_at
-        rec.persisted_at = actual_persisted_at
-        rec.created_at = actual_persisted_at
-        rec.effective_lead_seconds = round((rec_target - actual_persisted_at).total_seconds(), 3)
-        # Never imply forecast was available at decision_cutoff if generated/persisted afterwards
-        rec.available_at_decision_cutoff = bool(actual_persisted_at <= rec_cutoff)
+        rec_target = _to_utc(rec.target_time) or actual_pre_commit_at
+        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_pre_commit_at
+        rec.commit_safety_margin_seconds = effective_margin
+        rec.pre_commit_at = actual_pre_commit_at
+        rec.persisted_at = actual_pre_commit_at
+        rec.created_at = actual_pre_commit_at
+        rec.effective_lead_seconds = round((rec_target - actual_pre_commit_at).total_seconds(), 3)
+        rec.available_at_decision_cutoff = bool(actual_pre_commit_at <= rec_cutoff)
         session.add(rec)
 
     try:
@@ -633,6 +647,54 @@ def _generate_shadow_batch(
         raise ValueError(
             "Concurrent duplicate ForecastRun rejected by database idempotency constraint."
         ) from None
+
+    # Operational post-commit proof: capture conservative DB completion timestamp AFTER commit() returns
+    actual_commit_completed_at = _to_utc(clock_fn()) or datetime.now(UTC)
+    if actual_commit_completed_at < actual_pre_commit_at:
+        actual_commit_completed_at = actual_pre_commit_at
+
+    min_completed_lead = round(
+        min((tt - actual_commit_completed_at).total_seconds() for tt in target_times), 3
+    )
+    for run in new_runs:
+        run.commit_completed_at = actual_commit_completed_at
+        run.persisted_at = actual_commit_completed_at
+        run.effective_lead_seconds = min_completed_lead
+    for rec in pending_records:
+        rec_target = _to_utc(rec.target_time) or actual_commit_completed_at
+        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_commit_completed_at
+        rec.commit_completed_at = actual_commit_completed_at
+        rec.persisted_at = actual_commit_completed_at
+        rec.created_at = actual_commit_completed_at
+        rec.effective_lead_seconds = round((rec_target - actual_commit_completed_at).total_seconds(), 3)
+        rec.available_at_decision_cutoff = bool(actual_commit_completed_at <= rec_cutoff)
+
+    if evaluation_mode == "prospective_shadow":
+        completed_lead_s = (min_target - actual_commit_completed_at).total_seconds()
+        crossed_target = actual_commit_completed_at >= min_target or completed_lead_s <= 0.0
+        below_min_lead = completed_lead_s < float(min_lead_seconds)
+        competing_obs = session.scalars(
+            select(Observation.id)
+            .where(
+                Observation.sensor_id.in_(sensor_ids),
+                Observation.observed_at.in_(target_times),
+            )
+            .limit(1)
+        ).first()
+        if crossed_target or below_min_lead or competing_obs is not None:
+            for run in new_runs:
+                run.notes = (
+                    f"COMMIT_COMPLETION_TIMING_VIOLATION: completed_at={actual_commit_completed_at.isoformat()}, "
+                    f"lead_s={completed_lead_s:.2f}, competing_obs={competing_obs is not None}"
+                )
+            session.commit()
+            raise ValueError(
+                f"Prospective availability proof failed after commit completion: "
+                f"completed_at={actual_commit_completed_at.isoformat()}, lead={completed_lead_s:.1f}s "
+                f"(min={float(min_lead_seconds):.1f}s), competing_obs={competing_obs is not None}."
+            )
+
+    session.commit()
     return list(runs_by_key.values())
 
 
@@ -646,6 +708,7 @@ def generate_prospective_shadow_forecasts(
     data_mode: str = "shadow_live",
     idempotency_behavior: str = "return",
     min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
+    commit_safety_margin_seconds: float = DEFAULT_COMMIT_SAFETY_MARGIN_SECONDS,
     now_fn: Callable[[], datetime] | None = None,
 ) -> list[ForecastRun]:
     """Generate genuine prospective forecasts strictly BEFORE target_time occurs with verified artifacts."""
@@ -660,6 +723,7 @@ def generate_prospective_shadow_forecasts(
         data_mode=data_mode,
         idempotency_behavior=idempotency_behavior,
         min_lead_seconds=min_lead_seconds,
+        commit_safety_margin_seconds=commit_safety_margin_seconds,
         now_fn=now_fn,
     )
 
