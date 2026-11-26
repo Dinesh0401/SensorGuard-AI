@@ -14,6 +14,9 @@ import hashlib
 import json
 import logging
 import math
+import os
+import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from sensorguard.calibration import ConformalizedQuantileRegression, SplitConformalCalibrator, policy
@@ -39,12 +42,18 @@ from sensorguard.models.forecasters import (
     LightGBMQuantileForecaster,
     PersistenceForecaster,
 )
-from sensorguard.models.manifest import ModelManifest
 from sensorguard.models.sage import SAGEConfig, SAGEForecaster
 from sensorguard.models.sage_adaptive import (
     AdaptiveSAGEConfig,
     AdaptiveSAGEForecaster,
     compute_wilson_ci,
+)
+from sensorguard.models.shadow_artifacts import (
+    FEATURE_SCHEMA_VERSION,
+    SHADOW_CODE_VERSION,
+    serialize_shadow_model_artifact,
+    to_utc_dt,
+    verify_and_load_shadow_artifact,
 )
 from sensorguard.replay import PointInTimeReplayEngine
 
@@ -79,24 +88,49 @@ SHADOW_MODEL_SPECS: dict[str, dict[str, str]] = {
 }
 
 
+_LEGACY_PLACEHOLDER_MODEL_SHA = hashlib.sha256(b"shadow-suite-m86").hexdigest()
+DEFAULT_MIN_LEAD_SECONDS = 300.0
+
+
 def _to_utc(dt: Any) -> datetime | None:
-    if dt is None or (isinstance(dt, float) and math.isnan(dt)):
-        return None
-    if hasattr(dt, "to_pydatetime"):
-        dt = dt.to_pydatetime()
-    elif isinstance(dt, str):
-        dt = datetime.fromisoformat(dt)
-    if not isinstance(dt, datetime):
-        return None
-    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+    return to_utc_dt(dt)
+
+
+def _resolve_availability_cutoff(
+    df: pd.DataFrame,
+    fallback_dt: datetime,
+    session: Session | None = None,
+) -> datetime:
+    """Resolve latest timestamp when training/calibration labels actually became available."""
+    max_avail = fallback_dt
+    for col in ("label_available_at", "target_available_at", "persisted_at", "fetched_at"):
+        if col in df.columns:
+            parsed = pd.to_datetime(df[col], utc=True, errors="coerce").dropna()
+            if not parsed.empty:
+                cand = _to_utc(parsed.max())
+                if cand is not None and cand > max_avail:
+                    max_avail = cand
+    if session is not None:
+        db_max = session.scalar(
+            select(func.max(func.coalesce(Observation.persisted_at, Observation.fetched_at))).where(
+                Observation.observed_at <= fallback_dt
+            )
+        )
+        db_dt = _to_utc(db_max)
+        if db_dt is not None and db_dt > max_avail:
+            max_avail = db_dt
+    return max_avail
 
 
 def fit_shadow_suite(
     featured_df: pd.DataFrame,
     station_coords: dict[str, tuple[float, float]],
     nominal_coverage: float = 0.90,
+    artifact_dir: str | Path | None = None,
+    session: Session | None = None,
+    model_created_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Train all 5 shadow models strictly on chronological historical splits with artifact lineage."""
+    """Train all 5 shadow models strictly on chronological historical splits & serialize immutable JSON artifacts."""
     splits = partition_dataset(featured_df, station_coords, train_pct=0.70, cal_pct=0.30)
     train_df, cal_df = splits.train, splits.calibrate
     cols = splits.feature_columns
@@ -143,33 +177,51 @@ def fit_shadow_suite(
 
     lgb_pt = LightGBMPointForecaster(feature_columns=cols).fit(train_df, y_tr)
 
-    fit_finished_at = datetime.now(UTC).isoformat()
-    train_max_ts = str(_to_utc(cal_df["timestamp"].max()) or fit_finished_at)
-    provenance: dict[str, dict[str, str]] = {}
-    for m_key, spec in SHADOW_MODEL_SPECS.items():
-        fp = hashlib.sha256(
-            f"{spec['model_id']}:{spec['model_version']}:{train_max_ts}:{len(train_df)}:{len(cal_df)}".encode()
-        ).hexdigest()[:12]
-        provenance[m_key] = {
-            "model_created_at": fit_finished_at,
-            "artifact_immutable_ref": f"{spec['model_id']}@{spec['model_version']}#fit_{fp}",
-        }
+    fit_finished_at = _to_utc(model_created_at) or datetime.now(UTC)
+    train_data_cutoff = _to_utc(train_df["timestamp"].max()) or fit_finished_at
+    cal_data_cutoff = _to_utc(cal_df["timestamp"].max()) or fit_finished_at
+    train_avail_cutoff = _resolve_availability_cutoff(train_df, train_data_cutoff, session=session)
+    unf_data_cutoff = _to_utc(unfiltered_tr["timestamp"].max()) or train_data_cutoff
+    unf_avail_cutoff = _resolve_availability_cutoff(unfiltered_tr, unf_data_cutoff, session=session)
+    train_avail_cutoff = max(train_avail_cutoff, unf_avail_cutoff)
+    cal_avail_cutoff = _resolve_availability_cutoff(cal_df, cal_data_cutoff, session=session)
 
-    # Anchor sage_static metadata to audited artifact manifest when available
-    try:
-        manifest_p = Path("artifacts/models/manifest.json")
-        if manifest_p.exists():
-            m = ModelManifest.load(manifest_p)
-            provenance["sage_static"] = {
-                "model_created_at": m.created_at,
-                "artifact_immutable_ref": f"{m.model_id}@{m.version}#{m.sha256[:12]}",
-            }
-    except (OSError, ValueError, KeyError) as exc:
-        logger.debug("Skipping optional serving manifest lookup during shadow fit: %s", exc)
+    if artifact_dir is not None:
+        resolved_art_dir = Path(artifact_dir)
+    else:
+        env_art_dir = os.getenv("SENSORGUARD_SHADOW_ARTIFACT_DIR")
+        resolved_art_dir = (
+            Path(env_art_dir) if env_art_dir else Path(tempfile.mkdtemp(prefix="sg_shadow_artifacts_"))
+        )
+
+    model_objects: dict[str, Any] = {
+        "persistence": (persist, persist_cal),
+        "locally_weighted_mar": mar_local,
+        "lightgbm_cqr": (lgb_q, cqr),
+        "sage_static": sage_static,
+        "sage_adaptive": sage_adaptive,
+    }
+    provenance: dict[str, dict[str, Any]] = {}
+    for m_key, spec in SHADOW_MODEL_SPECS.items():
+        provenance[m_key] = serialize_shadow_model_artifact(
+            model_key=m_key,
+            spec=spec,
+            model_obj=model_objects[m_key],
+            feature_columns=cols,
+            nominal_coverage=nominal_coverage,
+            model_created_at=fit_finished_at,
+            training_completed_at=fit_finished_at,
+            training_data_cutoff=train_data_cutoff,
+            training_data_availability_cutoff=train_avail_cutoff,
+            calibration_cutoff=cal_data_cutoff,
+            calibration_availability_cutoff=cal_avail_cutoff,
+            artifact_dir=resolved_art_dir,
+        )
 
     return {
         "feature_columns": cols,
         "nominal_coverage": nominal_coverage,
+        "artifact_dir": str(resolved_art_dir),
         "model_provenance": provenance,
         "persistence": (persist, persist_cal),
         "locally_weighted_mar": mar_local,
@@ -228,13 +280,18 @@ def _generate_shadow_batch(
     dataset_hash: str | None = None,
     data_mode: str = "shadow_live",
     idempotency_behavior: str = "return",
+    min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
+    now_fn: Callable[[], datetime] | None = None,
 ) -> list[ForecastRun]:
-    """Core generator enforcing honest generation/persistence timestamps & DB idempotency."""
+    """Core generator enforcing verified JSON artifacts, honest lead/persistence timestamps & DB idempotency."""
     if evaluation_mode not in {"prospective_shadow", "retrospective_replay"}:
         raise ValueError(f"Unsupported evaluation_mode: {evaluation_mode}")
     if not decision_cutoffs:
         raise ValueError("decision_cutoffs cannot be empty.")
+    if evaluation_mode == "prospective_shadow" and float(min_lead_seconds) <= 0.0:
+        raise ValueError(f"min_lead_seconds must be strictly positive (got {min_lead_seconds}).")
 
+    clock_fn = now_fn or (lambda: datetime.now(UTC))
     norm_cutoffs = sorted({_to_utc(tc) for tc in decision_cutoffs if _to_utc(tc) is not None})
     if not norm_cutoffs:
         raise ValueError("No valid UTC decision_cutoffs provided.")
@@ -253,16 +310,30 @@ def _generate_shadow_batch(
         raise ValueError("No active PM2.5 sensors found for shadow forecasting.")
 
     sensor_ids = [s.id for s in sensors]
-    actual_generated_at = datetime.now(UTC)
+    actual_generated_at = _to_utc(clock_fn()) or datetime.now(UTC)
+    feature_cols: list[str] = list(fitted_models["feature_columns"])
+    nominal_cov = float(fitted_models["nominal_coverage"])
+    prov_map = fitted_models.get("model_provenance", {})
 
-    # STRICT M8.6 PROSPECTIVE INVARIANT: target_time MUST be strictly in the future and absent from DB
+    # STRICT M8.7 PROSPECTIVE INVARIANTS:
+    # 1. Verify genuine serialized JSON artifacts & SHA-256 over disk bytes BEFORE prediction
+    # 2. Enforce strictly positive generation lead >= min_lead_seconds & pre-existing target absence
     target_times = [c + timedelta(hours=1) for c in norm_cutoffs]
+    runtime_models: dict[str, Any] = {}
+    verified_prov: dict[str, dict[str, Any]] = {}
+
     if evaluation_mode == "prospective_shadow":
         min_target = min(target_times)
-        if actual_generated_at >= min_target:
+        gen_lead_s = (min_target - actual_generated_at).total_seconds()
+        if gen_lead_s <= 0.0:
             raise ValueError(
                 f"Backdated prospective violation: actual generation time {actual_generated_at.isoformat()} "
                 f">= target_time {min_target.isoformat()}. Use generate_retrospective_replay_forecasts()."
+            )
+        if gen_lead_s < float(min_lead_seconds):
+            raise ValueError(
+                f"Insufficient prospective lead time at generation: {gen_lead_s:.1f}s < "
+                f"min_lead_seconds {float(min_lead_seconds):.1f}s before {min_target.isoformat()}."
             )
         existing_truth = session.scalars(
             select(Observation.id)
@@ -277,14 +348,58 @@ def _generate_shadow_batch(
                 "Backdated prospective violation: target observations already exist in database. "
                 "Retrospective evaluations must use evaluation_mode='retrospective_replay'."
             )
+        for m_key, spec in SHADOW_MODEL_SPECS.items():
+            loaded_model, loaded_meta = verify_and_load_shadow_artifact(
+                provenance_entry=prov_map.get(m_key, {}),
+                expected_model_key=m_key,
+                expected_spec=spec,
+                expected_feature_columns=feature_cols,
+                expected_nominal_coverage=nominal_cov,
+                evaluation_time=actual_generated_at,
+            )
+            runtime_models[m_key] = loaded_model
+            verified_prov[m_key] = loaded_meta
+    else:
+        for m_key, spec in SHADOW_MODEL_SPECS.items():
+            entry = prov_map.get(m_key, {})
+            art_sha = str(entry.get("artifact_sha256") or "")
+            imm_ref = str(entry.get("artifact_immutable_ref") or "")
+            if art_sha and entry.get("artifact_path") and Path(str(entry["artifact_path"])).exists():
+                loaded_model, loaded_meta = verify_and_load_shadow_artifact(
+                    provenance_entry=entry,
+                    expected_model_key=m_key,
+                    expected_spec=spec,
+                    expected_feature_columns=feature_cols,
+                    expected_nominal_coverage=nominal_cov,
+                    evaluation_time=None,
+                )
+                runtime_models[m_key] = loaded_model
+                verified_prov[m_key] = loaded_meta
+            else:
+                # Retrospective isolated fallback if explicit in-memory models were supplied without disk artifacts
+                runtime_models[m_key] = fitted_models[m_key]
+                retro_sha = (
+                    art_sha
+                    if len(art_sha) == 64
+                    else hashlib.sha256(
+                        f"retrospective_in_memory:{spec['model_id']}:{spec['model_version']}".encode()
+                    ).hexdigest()
+                )
+                verified_prov[m_key] = {
+                    "model_created_at": _to_utc(entry.get("model_created_at")) or actual_generated_at,
+                    "training_completed_at": _to_utc(entry.get("training_completed_at")) or actual_generated_at,
+                    "training_data_cutoff": _to_utc(entry.get("training_data_cutoff")),
+                    "calibration_cutoff": _to_utc(entry.get("calibration_cutoff")),
+                    "code_version": str(entry.get("code_version") or SHADOW_CODE_VERSION),
+                    "feature_schema_version": str(entry.get("feature_schema_version") or FEATURE_SCHEMA_VERSION),
+                    "artifact_sha256": retro_sha,
+                    "artifact_immutable_ref": imm_ref or f"{spec['model_id']}@{spec['model_version']}#retrospective_unserialized",
+                }
 
+    infer_models = {**fitted_models, **runtime_models}
     sensor_to_station = {s.id: s.station_id for s in sensors}
     station_to_sensor = {s.station_id: s.id for s in sensors}
     replay = PointInTimeReplayEngine(session)
-    feature_cols: list[str] = fitted_models["feature_columns"]
-    nominal_cov = float(fitted_models["nominal_coverage"])
-    model_sha_placeholder = hashlib.sha256(b"shadow-suite-m86").hexdigest()
-    prov_map = fitted_models.get("model_provenance", {})
 
     batch_cutoffs_key = (
         "|".join(c.isoformat() for c in norm_cutoffs) + f"|stations={sorted(station_to_sensor)}"
@@ -292,17 +407,24 @@ def _generate_shadow_batch(
     max_cutoff = max(norm_cutoffs)
     runs_by_key: dict[str, ForecastRun] = {}
     new_keys_to_insert: list[str] = []
+    idem_keys_by_model: dict[str, str] = {}
 
     for m_key, spec in SHADOW_MODEL_SPECS.items():
-        m_prov = prov_map.get(m_key, {})
-        imm_ref = str(
-            m_prov.get("artifact_immutable_ref") or f"{spec['model_id']}@{spec['model_version']}#unpinned"
+        m_meta = verified_prov[m_key]
+        imm_ref = str(m_meta["artifact_immutable_ref"])
+        art_sha = str(m_meta["artifact_sha256"])
+        train_done_dt = _to_utc(m_meta.get("training_completed_at"))
+        created_iso = (
+            m_meta["model_created_at"].isoformat()
+            if isinstance(m_meta.get("model_created_at"), datetime)
+            else str(m_meta.get("model_created_at") or "")
         )
         idem_raw = (
             f"shadow:{evaluation_mode}:{data_mode}:{spec['model_id']}:{spec['model_version']}:"
-            f"{imm_ref}:{batch_cutoffs_key}"
+            f"{art_sha}:{imm_ref}:{batch_cutoffs_key}"
         )
         idem_key = hashlib.sha256(idem_raw.encode("utf-8")).hexdigest()
+        idem_keys_by_model[m_key] = idem_key
 
         existing_run = session.scalars(
             select(ForecastRun).where(ForecastRun.idempotency_key == idem_key)
@@ -317,29 +439,32 @@ def _generate_shadow_batch(
         run = ForecastRun(
             model_id=spec["model_id"],
             model_version=spec["model_version"],
-            model_sha256=model_sha_placeholder,
+            model_sha256=art_sha,
             dataset_hash=dataset_hash,
             algorithm=spec["algorithm"],
             execution_mode="shadow",
             evaluation_mode=evaluation_mode,
             data_mode=data_mode,
-            model_created_at=m_prov.get("model_created_at"),
+            model_created_at=created_iso or None,
             artifact_immutable_ref=imm_ref,
+            training_completed_at=train_done_dt,
+            training_data_cutoff=_to_utc(m_meta.get("training_data_cutoff")),
+            calibration_cutoff=_to_utc(m_meta.get("calibration_cutoff")),
+            code_version=str(m_meta.get("code_version") or SHADOW_CODE_VERSION),
+            feature_schema_version=str(m_meta.get("feature_schema_version") or FEATURE_SCHEMA_VERSION),
             idempotency_key=idem_key,
             nominal_coverage=nominal_cov,
+            min_lead_seconds=float(min_lead_seconds) if evaluation_mode == "prospective_shadow" else 0.0,
             issued_at=actual_generated_at,
             generated_at=actual_generated_at,
             persisted_at=actual_generated_at,
             decision_cutoff=max_cutoff,
-            notes=f"Milestone 8.6 {evaluation_mode} batch",
+            notes=f"Milestone 8.7 {evaluation_mode} batch",
         )
-        session.add(run)
         runs_by_key[m_key] = run
 
     if not new_keys_to_insert:
         return list(runs_by_key.values())
-
-    session.flush()
 
     pending_snapshots: list[ForecastFeatureSnapshot] = []
     pending_records: list[ForecastRecord] = []
@@ -411,12 +536,13 @@ def _generate_shadow_batch(
             )
 
             for m_key in new_keys_to_insert:
+                m_meta = verified_prov[m_key]
                 pt, lo, hi, st_label, reason, d_sens, scen = _predict_single_shadow_model(
-                    m_key, fitted_models, row_df
+                    m_key, infer_models, row_df
                 )
                 pending_records.append(
                     ForecastRecord(
-                        run_id=runs_by_key[m_key].id,
+                        run=runs_by_key[m_key],
                         station_id=st_id,
                         sensor_id=sens_id,
                         decision_cutoff=cutoff,
@@ -431,32 +557,76 @@ def _generate_shadow_batch(
                         newest_source_observed_at=newest_obs,
                         feature_hash=feat_hash,
                         scenario_bounds_json=json.dumps(scen, sort_keys=True) if scen else None,
+                        artifact_immutable_ref=str(m_meta["artifact_immutable_ref"]),
+                        artifact_sha256=str(m_meta["artifact_sha256"]),
+                        training_completed_at=_to_utc(m_meta.get("training_completed_at")),
+                        min_lead_seconds=float(min_lead_seconds)
+                        if evaluation_mode == "prospective_shadow"
+                        else 0.0,
                         generated_at=actual_generated_at,
                         persisted_at=actual_generated_at,
                         created_at=actual_generated_at,
                     )
                 )
 
-    actual_persisted_at = datetime.now(UTC)
+    actual_persisted_at = _to_utc(clock_fn()) or datetime.now(UTC)
     if evaluation_mode == "prospective_shadow":
         min_target = min(target_times)
-        if actual_persisted_at >= min_target:
+        persist_lead_s = (min_target - actual_persisted_at).total_seconds()
+        if persist_lead_s <= 0.0 or persist_lead_s < float(min_lead_seconds):
             session.rollback()
             raise ValueError(
-                f"Prospective commit aborted: persistence time {actual_persisted_at.isoformat()} >= target_time."
+                f"Prospective commit aborted: persistence lead time {persist_lead_s:.1f}s < "
+                f"min_lead_seconds {float(min_lead_seconds):.1f}s at commit time {actual_persisted_at.isoformat()}."
+            )
+        # Re-verify before commit that no concurrent poll persisted target truth mid-inference
+        late_existing = session.scalars(
+            select(Observation.id)
+            .where(
+                Observation.sensor_id.in_(sensor_ids),
+                Observation.observed_at.in_(target_times),
+            )
+            .limit(1)
+        ).first()
+        if late_existing is not None:
+            session.rollback()
+            raise ValueError(
+                "Prospective commit aborted: target observation arrived concurrently before forecast commit."
             )
 
+    min_rec_lead = round(min((tt - actual_persisted_at).total_seconds() for tt in target_times), 3)
     for m_key in new_keys_to_insert:
         runs_by_key[m_key].persisted_at = actual_persisted_at
+        runs_by_key[m_key].effective_lead_seconds = min_rec_lead
+        session.add(runs_by_key[m_key])
     for snap in pending_snapshots:
         snap.created_at = actual_persisted_at
         session.add(snap)
     for rec in pending_records:
+        rec_target = _to_utc(rec.target_time) or actual_persisted_at
+        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_persisted_at
         rec.persisted_at = actual_persisted_at
         rec.created_at = actual_persisted_at
+        rec.effective_lead_seconds = round((rec_target - actual_persisted_at).total_seconds(), 3)
+        # Never imply forecast was available at decision_cutoff if generated/persisted afterwards
+        rec.available_at_decision_cutoff = bool(actual_persisted_at <= rec_cutoff)
         session.add(rec)
 
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        if idempotency_behavior == "return":
+            existing_rows = list(
+                session.scalars(
+                    select(ForecastRun).where(
+                        ForecastRun.idempotency_key.in_(list(idem_keys_by_model.values()))
+                    )
+                ).all()
+            )
+            if len(existing_rows) == len(SHADOW_MODEL_SPECS):
+                return existing_rows
+        raise ValueError("Concurrent duplicate ForecastRun rejected by database idempotency constraint.") from None
     return list(runs_by_key.values())
 
 
@@ -469,8 +639,10 @@ def generate_prospective_shadow_forecasts(
     dataset_hash: str | None = None,
     data_mode: str = "shadow_live",
     idempotency_behavior: str = "return",
+    min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
+    now_fn: Callable[[], datetime] | None = None,
 ) -> list[ForecastRun]:
-    """Generate genuine prospective forecasts strictly BEFORE target_time occurs or exists in DB."""
+    """Generate genuine prospective forecasts strictly BEFORE target_time occurs with verified artifacts."""
     return _generate_shadow_batch(
         session=session,
         decision_cutoffs=decision_cutoffs,
@@ -481,6 +653,8 @@ def generate_prospective_shadow_forecasts(
         dataset_hash=dataset_hash,
         data_mode=data_mode,
         idempotency_behavior=idempotency_behavior,
+        min_lead_seconds=min_lead_seconds,
+        now_fn=now_fn,
     )
 
 
@@ -493,6 +667,7 @@ def generate_retrospective_replay_forecasts(
     dataset_hash: str | None = None,
     data_mode: str = "archived_historical",
     idempotency_behavior: str = "return",
+    now_fn: Callable[[], datetime] | None = None,
 ) -> list[ForecastRun]:
     """Generate point-in-time historical replay predictions clearly flagged as retrospective_replay."""
     return _generate_shadow_batch(
@@ -505,6 +680,8 @@ def generate_retrospective_replay_forecasts(
         dataset_hash=dataset_hash,
         data_mode=data_mode,
         idempotency_behavior=idempotency_behavior,
+        min_lead_seconds=0.0,
+        now_fn=now_fn,
     )
 
 
@@ -565,12 +742,34 @@ def _compute_subgroup_metrics(rows: list[dict[str, Any]], alpha: float) -> dict[
     }
 
 
+def _is_valid_pinned_artifact(
+    art_sha: str | None,
+    imm_ref: str | None,
+    evaluation_mode: str,
+) -> bool:
+    """Validate artifact SHA & reference are non-placeholder, hex-64, and byte-pinned for prospective runs."""
+    sha = str(art_sha or "").lower()
+    ref = str(imm_ref or "")
+    if len(sha) != 64 or sha == _LEGACY_PLACEHOLDER_MODEL_SHA:
+        return False
+    try:
+        int(sha, 16)
+    except ValueError:
+        return False
+    if not ref or "#unpinned" in ref or "#data_" in ref or "#fit_" in ref:
+        return False
+    if evaluation_mode == "prospective_shadow" and "#retrospective_unserialized" in ref:
+        return False
+    return f"#{sha[:12]}" in ref
+
+
 def _evaluate_shadow_subset(
     session: Session,
     evaluation_mode: str,
     min_matched_outcomes: int,
     min_unique_hours: int,
     delay_threshold_hours: float,
+    min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
 ) -> dict[str, Any]:
     """Evaluate strictly either prospective_shadow OR retrospective_replay runs (never mixed)."""
     shadow_runs = list(
@@ -589,10 +788,16 @@ def _evaluate_shadow_subset(
             "evaluation_mode": evaluation_mode,
             "calibration_claim_eligible": False,
             "adaptive_sage_promotion_eligible": False,
+            "artifact_integrity_verified": False,
             "min_matched_outcomes_required": min_matched_outcomes,
             "min_unique_hours_required": min_unique_hours,
+            "min_lead_seconds_required": min_lead_seconds,
             "truly_prospective_count": 0,
             "backdated_violation_count": 0,
+            "lead_time_violation_count": 0,
+            "artifact_violation_count": 0,
+            "available_at_decision_cutoff_count": 0,
+            "post_cutoff_pre_target_count": 0,
             "models": {},
         }
 
@@ -606,10 +811,16 @@ def _evaluate_shadow_subset(
             "evaluation_mode": evaluation_mode,
             "calibration_claim_eligible": False,
             "adaptive_sage_promotion_eligible": False,
+            "artifact_integrity_verified": False,
             "min_matched_outcomes_required": min_matched_outcomes,
             "min_unique_hours_required": min_unique_hours,
+            "min_lead_seconds_required": min_lead_seconds,
             "truly_prospective_count": 0,
             "backdated_violation_count": 0,
+            "lead_time_violation_count": 0,
+            "artifact_violation_count": 0,
+            "available_at_decision_cutoff_count": 0,
+            "post_cutoff_pre_target_count": 0,
             "models": {},
         }
 
@@ -666,6 +877,11 @@ def _evaluate_shadow_subset(
     published_lookup: dict[str, dict[tuple[int, datetime], tuple[float, float, float]]] = {}
     total_truly_prospective = 0
     total_backdated_violations = 0
+    total_lead_violations = 0
+    total_artifact_violations = 0
+    total_avail_at_cutoff = 0
+    total_post_cutoff_pre_target = 0
+    all_lead_seconds: list[float] = []
     min_matched_seen: int | None = None
     min_hours_seen: int | None = None
 
@@ -676,7 +892,12 @@ def _evaluate_shadow_subset(
         abstained_matched = 0
         stale_abstain_cnt = 0
         backdated_violations = 0
+        lead_violations = 0
+        artifact_violations = 0
+        avail_at_cutoff_cnt = 0
+        post_cutoff_cnt = 0
         prospective_valid_recs = 0
+        lead_seconds_list: list[float] = []
         source_ages: list[float] = []
         pub_stations: list[int] = []
         pub_targets: list[datetime] = []
@@ -694,30 +915,63 @@ def _evaluate_shadow_subset(
             t_cutoff = _to_utc(rec.decision_cutoff)
             t_persisted = _to_utc(rec.persisted_at) or _to_utc(rec.created_at)
             t_generated = _to_utc(rec.generated_at) or _to_utc(run_obj.generated_at)
+            t_train_done = _to_utc(rec.training_completed_at) or _to_utc(run_obj.training_completed_at)
             obs = truth_map.get((rec.sensor_id, t_target)) if t_target else None
 
-            # Genuine prospective check: generation AND persistence occurred BEFORE target_time
-            # and BEFORE any arrival of matched target observation
             if evaluation_mode == "prospective_shadow":
+                art_sha = rec.artifact_sha256 or run_obj.model_sha256
+                imm_ref = rec.artifact_immutable_ref or run_obj.artifact_immutable_ref
+                art_ok = _is_valid_pinned_artifact(art_sha, imm_ref, evaluation_mode)
+                train_ok = bool(
+                    t_train_done is not None
+                    and t_generated is not None
+                    and t_train_done <= t_generated
+                )
                 pre_target_ok = bool(
                     t_target is not None
                     and t_generated is not None
                     and t_persisted is not None
+                    and t_generated <= t_persisted
                     and t_generated < t_target
                     and t_persisted < t_target
                 )
+                actual_lead_s = (
+                    (t_target - t_persisted).total_seconds()
+                    if (t_target is not None and t_persisted is not None)
+                    else -1.0
+                )
+                req_lead = max(float(min_lead_seconds), float(rec.min_lead_seconds or 0.0))
+                lead_ok = bool(actual_lead_s > 0.0 and actual_lead_s >= req_lead)
                 obs_pers = _to_utc(obs.persisted_at) if obs is not None else None
                 pre_obs_ok = (
                     True
                     if obs is None
                     else bool(obs_pers is not None and t_persisted is not None and obs_pers > t_persisted)
                 )
-                if not (pre_target_ok and pre_obs_ok):
+                if not art_ok:
+                    artifact_violations += 1
+                    total_artifact_violations += 1
+                if not pre_target_ok or not pre_obs_ok or not train_ok:
                     backdated_violations += 1
                     total_backdated_violations += 1
+                if not lead_ok:
+                    lead_violations += 1
+                    total_lead_violations += 1
+                if not (art_ok and pre_target_ok and pre_obs_ok and train_ok and lead_ok):
                     continue
+
                 prospective_valid_recs += 1
                 total_truly_prospective += 1
+                lead_seconds_list.append(actual_lead_s)
+                all_lead_seconds.append(actual_lead_s)
+                if t_cutoff is not None and t_persisted is not None and t_persisted <= t_cutoff:
+                    avail_at_cutoff_cnt += 1
+                    total_avail_at_cutoff += 1
+                else:
+                    post_cutoff_cnt += 1
+                    total_post_cutoff_pre_target += 1
+            elif t_target is not None and t_persisted is not None:
+                lead_seconds_list.append((t_target - t_persisted).total_seconds())
 
             src_age = (
                 max(0.0, (t_cutoff - _to_utc(rec.newest_source_observed_at)).total_seconds() / 3600.0)
@@ -801,7 +1055,11 @@ def _evaluate_shadow_subset(
         outage_rows = [r for r in matched_rows if r["src_age"] >= 6.0]
 
         eligible = bool(
-            matched >= min_matched_outcomes and uniq_hours >= min_unique_hours and backdated_violations == 0
+            matched >= min_matched_outcomes
+            and uniq_hours >= min_unique_hours
+            and backdated_violations == 0
+            and lead_violations == 0
+            and artifact_violations == 0
         )
         total_eval = matched + unmatched
 
@@ -811,6 +1069,19 @@ def _evaluate_shadow_subset(
             if evaluation_mode == "prospective_shadow"
             else 0,
             "backdated_violation_count": backdated_violations,
+            "lead_time_violation_count": lead_violations,
+            "artifact_violation_count": artifact_violations,
+            "available_at_decision_cutoff_count": avail_at_cutoff_cnt,
+            "post_cutoff_pre_target_count": post_cutoff_cnt,
+            "min_effective_lead_minutes": round(min(lead_seconds_list) / 60.0, 2)
+            if lead_seconds_list
+            else None,
+            "mean_effective_lead_minutes": round((sum(lead_seconds_list) / len(lead_seconds_list)) / 60.0, 2)
+            if lead_seconds_list
+            else None,
+            "max_effective_lead_minutes": round(max(lead_seconds_list) / 60.0, 2)
+            if lead_seconds_list
+            else None,
             "matched_count": matched,
             "unmatched_missing_truth_count": unmatched,
             "missing_label_rate": round(unmatched / total_eval, 4) if total_eval > 0 else 0.0,
@@ -884,6 +1155,8 @@ def _evaluate_shadow_subset(
         and min_hours_seen is not None
         and min_hours_seen >= min_unique_hours
         and total_backdated_violations == 0
+        and total_lead_violations == 0
+        and total_artifact_violations == 0
     )
 
     # Promotion block: Adaptive SAGE never eligible unless strictly eligible & beating MAR on matched parity
@@ -895,10 +1168,25 @@ def _evaluate_shadow_subset(
         "evaluation_mode": evaluation_mode,
         "calibration_claim_eligible": overall_eligible,
         "adaptive_sage_promotion_eligible": adaptive_promo_ok,
+        "artifact_integrity_verified": bool(
+            total_artifact_violations == 0 and total_truly_prospective > 0
+            if evaluation_mode == "prospective_shadow"
+            else total_artifact_violations == 0
+        ),
         "min_matched_outcomes_required": min_matched_outcomes,
         "min_unique_hours_required": min_unique_hours,
+        "min_lead_seconds_required": min_lead_seconds,
         "truly_prospective_count": total_truly_prospective if evaluation_mode == "prospective_shadow" else 0,
         "backdated_violation_count": total_backdated_violations,
+        "lead_time_violation_count": total_lead_violations,
+        "artifact_violation_count": total_artifact_violations,
+        "available_at_decision_cutoff_count": total_avail_at_cutoff,
+        "post_cutoff_pre_target_count": total_post_cutoff_pre_target,
+        "min_effective_lead_minutes": round(min(all_lead_seconds) / 60.0, 2) if all_lead_seconds else None,
+        "mean_effective_lead_minutes": round((sum(all_lead_seconds) / len(all_lead_seconds)) / 60.0, 2)
+        if all_lead_seconds
+        else None,
+        "max_effective_lead_minutes": round(max(all_lead_seconds) / 60.0, 2) if all_lead_seconds else None,
         "data_quality_incident_count": incident_count,
         "provider_incident_count": provider_incident_count,
         "matched_availability_vs_baselines": paired_vs_baselines,
@@ -916,6 +1204,7 @@ def reconcile_shadow_evaluation(
     min_unique_hours: int = 24,
     delay_threshold_hours: float = 1.5,
     evaluation_mode: str = "prospective_shadow",
+    min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
 ) -> dict[str, Any]:
     """Evaluate prospective shadow predictions separately from retrospective replays."""
     primary = _evaluate_shadow_subset(
@@ -924,6 +1213,7 @@ def reconcile_shadow_evaluation(
         min_matched_outcomes=min_matched_outcomes,
         min_unique_hours=min_unique_hours,
         delay_threshold_hours=delay_threshold_hours,
+        min_lead_seconds=min_lead_seconds,
     )
     if evaluation_mode == "prospective_shadow":
         retro_count = int(
@@ -943,5 +1233,6 @@ def reconcile_shadow_evaluation(
                 min_matched_outcomes=min_matched_outcomes,
                 min_unique_hours=min_unique_hours,
                 delay_threshold_hours=delay_threshold_hours,
+                min_lead_seconds=0.0,
             )
     return primary

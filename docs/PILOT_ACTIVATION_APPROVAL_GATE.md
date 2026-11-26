@@ -1,61 +1,68 @@
-# SensorGuard AI — Live Pilot Activation Approval Gate & Operator Checklist (Phase 8.6)
+# SensorGuard AI — Live Pilot Activation Approval Gate & Two-Stage Authorization (Phase 8.7)
 
-**Decision Status Today:** **NO-GO FOR LIVE POLLING & PUBLIC PRODUCTION (LOCKED PENDING AUTHORIZATION)**  
-**Prerequisite Pre-Flight Verification:** Offline `2026-11-22` snapshot confirmed only **2 of 8** feeds updating recently; all **8** require a live pre-flight verification after key provisioning.
+**Current Operational Status:** **LOCKED / FAIL-CLOSED PENDING OPERATOR AUTHORIZATION**  
+**Stage 1 Readiness (One-Time Pre-Flight Station Availability Check, Max 8–16 HTTP Calls):** **READY FOR EXPLICIT APPROVAL**  
+**Stage 2 Readiness (Recurring Shadow-Live Polling):** **READY FOR EXPLICIT SEPARATE APPROVAL ONLY AFTER STAGE 1 FEED VERIFICATION & OPERATOR SIGN-OFF**  
+**Public Production / Adaptive SAGE Promotion:** **NO-GO (Static `SAGEForecaster` only)**
 
 ---
 
-## 1. Exact Target Station & PM2.5 Sensor Inventory Requiring Live Check
+## 1. Two Separate Operational Authorization Decisions
 
-All values below come from stored database records (`stations` + `sensors`) with **zero external HTTP requests executed yet**:
+1. **Decision A — Limited One-Time Pre-Flight Station Availability Check (`<= 16` HTTP requests total):**
+   - Purpose: Probe `/v3/locations/{id}` once across the 8 UK stations below to confirm which sensors currently return active 2026 hourly measurements after provisioning `OPENAQ_API_KEY` server-side.
+   - Prerequisite controls verified: `OpenAQClient` per-attempt quota reservation (`max_requests_per_day <= 48`), single-leader lease, kill switch, and JSON-only shadow artifact verification are implemented and tested.
+2. **Decision B — Recurring Shadow-Live Polling (`shadow_live` mode):**
+   - Requires Stage 1 results first so `BoundedPilotConfig.allowed_location_ids` is restricted strictly to verified active sensors (e.g., LAQN pair `(154, 157)` unless EEA replacements are confirmed).
+   - Requires explicit operator unlock in `PilotControlState` (`kill_switch_active=False`, `opt_in_enabled=True`, non-null `authorized_at`, non-default `updated_by`) alongside `SENSORGUARD_POLLING_KILL_SWITCH=false`.
 
-| Priority | Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Last Stored Meta UTC | Live Status Today |
+---
+
+## 2. Target Station & PM2.5 Sensor Inventory (Offline `2026-11-22` Snapshot)
+
+All entries below reflect archived DB records with **zero external OpenAQ HTTP calls executed**:
+
+| Priority | Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Last Stored Meta UTC | Pre-Flight Action |
 |---|---|---|---|---|---|---|---:|
-| **Tier 1 (Expected Active)** | Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **TO VERIFY LIVE** |
-| **Tier 1 (Expected Active)** | Bexley - Slade Green | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **TO VERIFY LIVE** |
-| **Tier 2 (Aged Feed Check)** | London Harlington - UKA00472 | `141` | `261` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
-| **Tier 2 (Aged Feed Check)** | London Hillingdon - UKA00266 | `153` | `1927060` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
-| **Tier 2 (Aged Feed Check)** | Southampton Centre - UKA00235 | `698` | `1213` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
-| **Tier 2 (Aged Feed Check)** | Wicken Fen - UKA00362 | `804` | `1999688` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
-| **Tier 2 (Aged Feed Check)** | St Osyth - UKA00445 | `1795` | `1732639` | EEA | `ODC-BY` | `2026-05-26T12:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
-| **Tier 2 (Aged Feed Check)** | Manchester Piccadilly - UKA00248 | `2312` | `5269` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — VERIFY REPLACEMENT** |
+| **Tier 1** | Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE IN STAGE 1** |
+| **Tier 1** | Bexley - Slade Green | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE IN STAGE 1** |
+| **Tier 2** | London Harlington - UKA00472 | `141` | `261` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Tier 2** | London Hillingdon - UKA00266 | `153` | `1927060` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Tier 2** | Southampton Centre - UKA00235 | `698` | `1213` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Tier 2** | Wicken Fen - UKA00362 | `804` | `1999688` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Tier 2** | St Osyth - UKA00445 | `1795` | `1732639` | EEA | `ODC-BY` | `2026-05-26T12:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Tier 2** | Manchester Piccadilly - UKA00248 | `2312` | `5269` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
 
 ---
 
-## 2. Pre-Activation Operator Checklist
+## 3. Pre-Activation Operator Checklist
 
-Do not enable polling until every step is checked and signed off:
-
-1. **Server-Side Secrets & Environment Lock:**
-   - Provision `OPENAQ_API_KEY`, `ADMIN_API_KEY`, and PostgreSQL `DATABASE_URL` exclusively in `.env` (git-ignored). Never expose keys in `apps/web` or `NEXT_PUBLIC_*`.
-   - Confirm `SENSORGUARD_POLLING_KILL_SWITCH` is `"true"` during setup and `alembic upgrade head` reports `007_m86_safety_fencing (head)`.
-2. **Pre-Flight Availability Check (Max 8–16 HTTP Requests Total):**
-   - Explicitly approve running a one-time `/v3/locations/{id}` probe across the 8 location IDs to confirm which sensors currently return 2026 hourly measurements.
-   - Restrict `BoundedPilotConfig.allowed_location_ids` strictly to live active IDs (e.g., `(154, 157)` plus any verified replacement active UK DEFRA sensors).
-3. **Quota & Retry Configuration:**
-   - For `(154, 157)`: schedule every **2 hours** (`24` best-case / `48` worst-case HTTP attempts per day under `max_retries_per_request=1`).
-   - For up to 8 active sensors: schedule every **8 hours** (`24` best-case / `48` worst-case HTTP attempts per day) so a 100% retry episode never exceeds `48/day`.
-4. **Prospective Shadow Forecast Loop:**
-   - Generate hourly shadow runs strictly BEFORE `:00` target hour (`generate_prospective_shadow_forecasts`) -> ingest truth post-target via `run_bounded_opt_in_poll` -> run `reconcile_shadow_evaluation()` asynchronously.
-5. **Minimum Shadow Evaluation Duration & Thresholds Before Model Promotion or Live Labeling:**
-   - **Minimum Duration:** Continuous **>= 7 calendar days** (`>= 168` hours target horizon; hard software floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`).
-   - **Integrity Floor:** `backdated_violation_count == 0`, documented missing/delayed rates, reviewed `high_pollution` & `long_outage` subgroups, and completed [REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md) practitioner study (`>= 80%` comprehension on abstentions vs hardware failures).
+1. **Environment, Database & Secrets Lock:**
+   - Provision `OPENAQ_API_KEY`, `ADMIN_API_KEY`, and PostgreSQL `DATABASE_URL` in server-side `.env` (git-ignored; never exposed in `apps/web`).
+   - Keep `SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV=false` (fail closed HTTP `503` on durable rate-limiter failure).
+   - Confirm `alembic upgrade head` reports `008_m87_artifact_timing_gate (head)`.
+2. **Stage 1 Only — Authorize One-Time Pre-Flight Availability Probe (`<= 16` HTTP Calls):**
+   - Explicitly approve running `/v3/locations/{id}` once across the 8 station IDs and confirm active 2026 PM2.5 sensors + OpenAQ license attribution.
+3. **Stage 2 Only — Authorize Recurring Bounded Shadow Polling (`<= 48` HTTP Attempts/UTC Day):**
+   - Restrict `allowed_location_ids` strictly to live active sensors verified in Stage 1 (`(154, 157)` every **2h** -> `24` best-case / `48` worst-case HTTP attempts/day under `max_retries_per_request=1`).
+   - Run `fit_shadow_suite()` into an immutable artifact directory (`SENSORGUARD_SHADOW_ARTIFACT_DIR`) ensuring SHA-256 verified JSON artifacts (`sensorguard.shadow_artifact.v1`), then issue hourly forecasts via `generate_prospective_shadow_forecasts(..., min_lead_seconds=300.0)` strictly `>= 5` minutes before `:00` target time.
+4. **Minimum Prospective Shadow Duration & Usability Gate Before Promotion:**
+   - Continuous **>= 7 calendar days** (`>= 168` hours target horizon; hard floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`, `min_lead_seconds >= 300`, `backdated_violation_count == 0`, `lead_time_violation_count == 0`, `artifact_violation_count == 0`).
+   - Complete human practitioner study ([REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md); `0` participants currently recruited).
 
 ---
 
-## 3. Monitoring, Emergency Halt, Restart & Rollback Summary
+## 4. Emergency Halt & Rollback
 
-- **Emergency Halt (Instant, Zero DB):** Export `SENSORGUARD_POLLING_KILL_SWITCH=true` and restart scheduler/worker -> all workers return `SKIPPED_KILL_SWITCH`.
-- **Durable Multi-Worker Halt:** Execute `set_polling_kill_switch(session, kill_switch_active=True, opt_in_enabled=False, reason=..., updated_by=operator)`.
-- **Restart & Lease Recovery:** Workers hold renewable fenced leases (`pilot_poll_leases.fencing_token`); stalled workers lose heartbeat renewal and are aborted cleanly (`SKIPPED_STALE_FENCING_TOKEN`) before commit.
-- **Database Rollback:** `alembic downgrade 006_durable_pilot_control` (or `005_persistent_forecasts`); restore snapshot via `pg_restore` if needed; follow [MODEL_ROLLBACK.md](MODEL_ROLLBACK.md) for serving artifact rollback.
+- **Instant Halt:** Set `SENSORGUARD_POLLING_KILL_SWITCH=true` and restart worker -> returns `SKIPPED_KILL_SWITCH`.
+- **Durable Halt:** Execute `set_polling_kill_switch(session, kill_switch_active=True, opt_in_enabled=False, reason=..., updated_by=operator)`.
+- **Schema Rollback:** `alembic downgrade 007_m86_safety_fencing` (or `006_durable_pilot_control`); restore PostgreSQL snapshot via `pg_restore` if required; follow [MODEL_ROLLBACK.md](MODEL_ROLLBACK.md) for serving rollback.
 
 ---
 
-## 4. Formal Operator Authorization Sign-Off Block
+## 5. Formal Operator Sign-Off (Pending)
 
-- **Approved By (Name & Role):** `___________________________` (`NOT YET SIGNED`)
-- **Approved `allowed_location_ids`:** `[PENDING PRE-FLIGHT RESULT]`
-- **Approved Cadence & Daily Cap:** `<= 48 HTTP attempts/UTC day` (`max_retries_per_request = 1`)
-- **Usability Study Authorization:** `PENDING (0 participants recruited)`
-- **Date / UTC Timestamp:** `___________________________`
+- **Stage 1 Approval (One-Time Pre-Flight Check `<= 16` HTTP requests):** `NOT YET APPROVED`
+- **Stage 2 Approval (Recurring `shadow_live` Polling `<= 48` attempts/UTC day):** `NOT YET APPROVED`
+- **Approved `allowed_location_ids`:** `[PENDING STAGE 1 RESULT]`
+- **Approved By / UTC Timestamp:** `___________________________`
