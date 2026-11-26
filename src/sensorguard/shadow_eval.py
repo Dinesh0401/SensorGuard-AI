@@ -387,13 +387,17 @@ def _generate_shadow_batch(
                 )
                 verified_prov[m_key] = {
                     "model_created_at": _to_utc(entry.get("model_created_at")) or actual_generated_at,
-                    "training_completed_at": _to_utc(entry.get("training_completed_at")) or actual_generated_at,
+                    "training_completed_at": _to_utc(entry.get("training_completed_at"))
+                    or actual_generated_at,
                     "training_data_cutoff": _to_utc(entry.get("training_data_cutoff")),
                     "calibration_cutoff": _to_utc(entry.get("calibration_cutoff")),
                     "code_version": str(entry.get("code_version") or SHADOW_CODE_VERSION),
-                    "feature_schema_version": str(entry.get("feature_schema_version") or FEATURE_SCHEMA_VERSION),
+                    "feature_schema_version": str(
+                        entry.get("feature_schema_version") or FEATURE_SCHEMA_VERSION
+                    ),
                     "artifact_sha256": retro_sha,
-                    "artifact_immutable_ref": imm_ref or f"{spec['model_id']}@{spec['model_version']}#retrospective_unserialized",
+                    "artifact_immutable_ref": imm_ref
+                    or f"{spec['model_id']}@{spec['model_version']}#retrospective_unserialized",
                 }
 
     infer_models = {**fitted_models, **runtime_models}
@@ -626,7 +630,9 @@ def _generate_shadow_batch(
             )
             if len(existing_rows) == len(SHADOW_MODEL_SPECS):
                 return existing_rows
-        raise ValueError("Concurrent duplicate ForecastRun rejected by database idempotency constraint.") from None
+        raise ValueError(
+            "Concurrent duplicate ForecastRun rejected by database idempotency constraint."
+        ) from None
     return list(runs_by_key.values())
 
 
@@ -923,9 +929,7 @@ def _evaluate_shadow_subset(
                 imm_ref = rec.artifact_immutable_ref or run_obj.artifact_immutable_ref
                 art_ok = _is_valid_pinned_artifact(art_sha, imm_ref, evaluation_mode)
                 train_ok = bool(
-                    t_train_done is not None
-                    and t_generated is not None
-                    and t_train_done <= t_generated
+                    t_train_done is not None and t_generated is not None and t_train_done <= t_generated
                 )
                 pre_target_ok = bool(
                     t_target is not None

@@ -243,9 +243,7 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
 
         # Align simulated poll1 DB arrival timestamps with dry-run clock t_poll1 prior to fitting
         with factory() as norm_s:
-            for obs in norm_s.scalars(
-                select(Observation).where(Observation.observed_at == t_cutoff)
-            ).all():
+            for obs in norm_s.scalars(select(Observation).where(Observation.observed_at == t_cutoff)).all():
                 obs.fetched_at = t_poll1
                 obs.persisted_at = t_poll1
             norm_s.commit()
@@ -291,7 +289,9 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
             )
             assert len(runs) == 5
             recs = list(
-                sess.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_([r.id for r in runs]))).all()
+                sess.scalars(
+                    select(ForecastRecord).where(ForecastRecord.run_id.in_([r.id for r in runs]))
+                ).all()
             )
             assert len(recs) == 10
             for r in recs:
@@ -348,9 +348,7 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
             )
             assert used_after_fence == 1
             assert (
-                check_s.scalars(
-                    select(Observation).where(Observation.observed_at == t_target)
-                ).first()
+                check_s.scalars(select(Observation).where(Observation.observed_at == t_target)).first()
                 is None
             )
 
@@ -436,7 +434,9 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
         with factory() as fix_s:
             arrived_obs = list(
                 fix_s.scalars(
-                    select(Observation).where(Observation.sensor_id.in_([s1_id, s2_id]), Observation.observed_at == t_target)
+                    select(Observation).where(
+                        Observation.sensor_id.in_([s1_id, s2_id]), Observation.observed_at == t_target
+                    )
                 ).all()
             )
             for ob in arrived_obs:
