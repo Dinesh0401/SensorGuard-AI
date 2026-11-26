@@ -41,7 +41,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("provider", "budget_date_utc", name="uq_pilot_quota_provider_date"),
     )
-    op.create_index("ix_pilot_quota_states_budget_date_utc", "pilot_quota_states", ["budget_date_utc"], unique=False)
+    op.create_index(
+        "ix_pilot_quota_states_budget_date_utc", "pilot_quota_states", ["budget_date_utc"], unique=False
+    )
 
     op.create_table(
         "pilot_poll_leases",
@@ -70,7 +72,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("control_name"),
     )
-    op.create_index("ix_pilot_control_states_control_name", "pilot_control_states", ["control_name"], unique=True)
+    op.create_index(
+        "ix_pilot_control_states_control_name", "pilot_control_states", ["control_name"], unique=True
+    )
 
     op.create_table(
         "pilot_ingest_audit_runs",
@@ -93,7 +97,9 @@ def upgrade() -> None:
         sa.Column("error_summary", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index("ix_pilot_ingest_audit_runs_started_at", "pilot_ingest_audit_runs", ["started_at"], unique=False)
+    op.create_index(
+        "ix_pilot_ingest_audit_runs_started_at", "pilot_ingest_audit_runs", ["started_at"], unique=False
+    )
     op.create_index("ix_pilot_ingest_audit_runs_status", "pilot_ingest_audit_runs", ["status"], unique=False)
 
 

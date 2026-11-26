@@ -314,9 +314,7 @@ def generate_prospective_shadow_forecasts(
             row_df = pd.DataFrame([row])
             age_val = float(row.get("age_hours", 999.0))
             newest_obs = (
-                cutoff - timedelta(hours=age_val)
-                if math.isfinite(age_val) and age_val < 1e6
-                else None
+                cutoff - timedelta(hours=age_val) if math.isfinite(age_val) and age_val < 1e6 else None
             )
 
             for m_key in SHADOW_MODEL_SPECS:
@@ -368,9 +366,7 @@ def reconcile_shadow_evaluation(
         }
 
     run_ids = [r.id for r in shadow_runs]
-    records = list(
-        session.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_(run_ids))).all()
-    )
+    records = list(session.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_(run_ids))).all())
     if not records:
         return {
             "status": "NO_SHADOW_RECORDS",

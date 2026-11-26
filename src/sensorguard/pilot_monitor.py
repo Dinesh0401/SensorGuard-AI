@@ -221,7 +221,12 @@ def acquire_poll_lease(
             row = session.scalars(select(PilotPollLease).where(PilotPollLease.lease_name == lease_name)).one()
 
     existing_exp = _utc(row.expires_at)
-    was_expired_dirty = bool(row.holder_id is not None and row.holder_id != holder_id and existing_exp is not None and existing_exp <= now)
+    was_expired_dirty = bool(
+        row.holder_id is not None
+        and row.holder_id != holder_id
+        and existing_exp is not None
+        and existing_exp <= now
+    )
 
     stmt = (
         update(PilotPollLease)
@@ -283,7 +288,9 @@ def ensure_default_control_state(
 ) -> PilotControlState:
     """Return existing kill-switch state or create a safe fail-closed default row."""
     now = _utc(now_utc) or datetime.now(UTC)
-    row = session.scalars(select(PilotControlState).where(PilotControlState.control_name == control_name)).first()
+    row = session.scalars(
+        select(PilotControlState).where(PilotControlState.control_name == control_name)
+    ).first()
     if row is not None:
         return row
     row = PilotControlState(
@@ -560,7 +567,11 @@ def run_bounded_opt_in_poll(
         db_kill = bool(ctrl is not None and ctrl.kill_switch_active)
         db_unlocked = bool(ctrl is not None and (not ctrl.kill_switch_active) and ctrl.opt_in_enabled)
 
-        if env_kill or db_kill or (transport is None and config.require_db_unlock_for_live and not db_unlocked):
+        if (
+            env_kill
+            or db_kill
+            or (transport is None and config.require_db_unlock_for_live and not db_unlocked)
+        ):
             staleness = audit_station_staleness(
                 session,
                 reference_time=now,
@@ -770,9 +781,7 @@ def run_bounded_opt_in_poll(
 
             session.commit()
             final_status = (
-                "HTTP_429_BACKOFF"
-                if rate_limited_429
-                else ("QUOTA_EXHAUSTED" if quota_halted else "SUCCESS")
+                "HTTP_429_BACKOFF" if rate_limited_429 else ("QUOTA_EXHAUSTED" if quota_halted else "SUCCESS")
             )
             staleness = audit_station_staleness(
                 session,

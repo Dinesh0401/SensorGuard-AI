@@ -586,9 +586,7 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
     recent_audits: list[dict[str, Any]] = []
     try:
         audit_rows = list(
-            db.scalars(
-                select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id)).limit(5)
-            ).all()
+            db.scalars(select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id)).limit(5)).all()
         )
         recent_audits = [
             {

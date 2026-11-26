@@ -467,9 +467,7 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     with sf() as sess:
         obs_h2 = list(
             sess.scalars(
-                select(Observation)
-                .where(Observation.observed_at == h2)
-                .order_by(Observation.version.asc())
+                select(Observation).where(Observation.observed_at == h2).order_by(Observation.version.asc())
             ).all()
         )
         assert [o.version for o in obs_h2] == [1, 2]
@@ -477,8 +475,27 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
 
         ctrl_row = sess.scalars(select(PilotControlState)).first()
         assert ctrl_row is not None and ctrl_row.kill_switch_active is False
-        assert lease_ok := acquire_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now):
-            pass
+
+        lease_row = sess.scalars(select(PilotPollLease)).first()
+        assert lease_row is not None and lease_row.holder_id is None
+        acquired_m, _ = acquire_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now)
+        assert acquired_m is True
+        assert release_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now) is True
+
+        audits = list(sess.scalars(select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id))).all())
+        statuses = {a.status for a in audits}
+        assert {"SKIPPED_KILL_SWITCH", "SKIPPED_NO_LEASE", "HTTP_429_BACKOFF", "SUCCESS"}.issubset(statuses)
+    eng.dispose()
+
+
+def test_inspect_station_provider_metadata_offline(tmp_path) -> None:
+    """Verify station license and snapshot recency audit never calls external HTTP or assumes live state."""
+    import json
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import Base, Sensor, Station
 
     eng = create_engine(f"sqlite:///{tmp_path / 'meta_audit.db'}", future=True)
     Base.metadata.create_all(eng)
@@ -524,8 +541,12 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
         sess.flush()
         sess.add_all(
             [
-                Sensor(station_id=st_recent.id, provider_sensor_id=246, parameter="pm25", canonical_unit="µg/m³"),
-                Sensor(station_id=st_stale.id, provider_sensor_id=261, parameter="pm25", canonical_unit="µg/m³"),
+                Sensor(
+                    station_id=st_recent.id, provider_sensor_id=246, parameter="pm25", canonical_unit="µg/m³"
+                ),
+                Sensor(
+                    station_id=st_stale.id, provider_sensor_id=261, parameter="pm25", canonical_unit="µg/m³"
+                ),
             ]
         )
         sess.commit()
@@ -542,4 +563,3 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
         assert by_loc[141]["was_active_at_fetch_snapshot"] is False
         assert by_loc[141]["current_live_status"] == "UNVERIFIED_OFFLINE_MODE"
     eng.dispose()
-

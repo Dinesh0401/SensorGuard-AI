@@ -50,7 +50,9 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
     if manifest is None and DEFAULT_PRIMARY_MANIFEST.exists():
         manifest = ModelManifest.load(DEFAULT_PRIMARY_MANIFEST)
 
-    primary_sha = manifest.sha256 if manifest else "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115"
+    primary_sha = (
+        manifest.sha256 if manifest else "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115"
+    )
     primary_id = manifest.model_id if manifest else "sage_pilot_q1_2024"
     primary_ver = manifest.version if manifest else "1.0.0"
     dataset_hash = manifest.dataset_hash if manifest else "33805c42097fc86e"
