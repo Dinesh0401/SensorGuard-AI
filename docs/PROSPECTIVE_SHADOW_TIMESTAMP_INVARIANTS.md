@@ -1,46 +1,39 @@
-# SensorGuard AI — Prospective Shadow Timestamp Invariants & Evaluation Protocol (Phase 8.6)
+# SensorGuard AI — Prospective Shadow Timestamp Invariants & Evaluation Protocol (Phase 8.7)
 
-**Implementation:** [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/007_m86_safety_fencing.py`](../alembic/versions/007_m86_safety_fencing.py)  
-**Test Suite:** [`tests/test_shadow_eval.py`](../tests/test_shadow_eval.py)
+**Implementation:** [`src/sensorguard/models/shadow_artifacts.py`](../src/sensorguard/models/shadow_artifacts.py) · [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/008_m87_artifact_timing_gate.py`](../alembic/versions/008_m87_artifact_timing_gate.py)  
+**Test Suite:** [`tests/test_shadow_eval.py`](../tests/test_shadow_eval.py) · [`tests/test_live_pilot_dry_run.py`](../tests/test_live_pilot_dry_run.py)
 
 ---
 
-## 1. Mandatory Timestamp Separation
+## 1. Immutable JSON Artifact Integrity (Zero Untrusted Deserialization)
 
-Every shadow forecast persisted into PostgreSQL or SQLite carries five strictly distinct temporal fields (none derived from or conflated with `decision_cutoff`):
+Every prospective shadow model (`persistence`, `locally_weighted_mar`, `lightgbm_cqr`, `sage_static`, `sage_adaptive`) is serialized write-once by [`serialize_shadow_model_artifact`](../src/sensorguard/models/shadow_artifacts.py) into canonical UTF-8 `.json` artifacts (`schema_format = "sensorguard.shadow_artifact.v1"`):
+- **Zero `pickle` / `joblib` deserialization** on the shadow prediction path: linear/logistic propensity and Ridge pipelines serialize explicit numeric weights, conformal calibrators serialize scalar radii, and LightGBM models serialize official text trees via `booster_.model_to_string()`.
+- **Byte-Level SHA-256 Anchoring:** SHA-256 is computed over exact saved `.json` file bytes and embedded into `artifact_immutable_ref = "{model_id}@{model_version}#{sha256[:12]}"`, `ForecastRun.model_sha256`, and `ForecastRecord.artifact_sha256`.
+- **Training Provenance Recorded Per Artifact & ForecastRun:** `model_created_at`, `training_completed_at`, `training_data_cutoff`, `training_data_availability_cutoff`, `calibration_cutoff`, `calibration_availability_cutoff`, `code_version`, `feature_schema_version`, and `feature_schema_hash`.
+- **Fail-Closed Verification in `prospective_shadow`:** [`verify_and_load_shadow_artifact`](../src/sensorguard/models/shadow_artifacts.py) rejects missing files, tampered bytes, non-JSON files, constant placeholders (`sha256(b"shadow-suite-m86")`), dataset/fit hashes (`#unpinned`, `#data_`, `#fit_`), incompatible feature schemas, and labels whose availability cutoff post-dates `training_completed_at` or `model_created_at`.
 
-| Field | Semantics | Non-Backdating Invariant |
+---
+
+## 2. Mandatory Forecast Timing, Lead Time & Cutoff Honesty
+
+Every `ForecastRecord` and `ForecastRun` persists six distinct timing measurements (never collapsing `persisted_at` to `decision_cutoff` or claiming availability before commit):
+
+| Field | Semantics | Prospective Invariant |
 |---|---|---|
-| `decision_cutoff` | End of input telemetry window visible via `PointInTimeReplayEngine`. | `decision_cutoff <= target_time - 1h` |
-| `target_time` | Forecast verification timestamp (`decision_cutoff + 1h`). | Never in `observations` at forecast persistence time for `prospective_shadow` |
-| `generated_at` | Actual UTC wall-clock timestamp when estimator execution occurred. | Recorded live via `datetime.now(UTC)`; **for `prospective_shadow`, `generated_at < target_time`** |
-| `persisted_at` | Actual UTC wall-clock commit timestamp immediately prior to `session.commit()`. | **`persisted_at < target_time`** AND **`obs.persisted_at > forecast.persisted_at`** |
-| `created_at` | Record row persistence timestamp. | Equal to `persisted_at`; **never backdated to `decision_cutoff`** |
-
-In addition, every `ForecastRun` records exact model provenance (`model_created_at`, `artifact_immutable_ref`) and a unique SHA-256 `idempotency_key`, while `forecasts` enforces database-level uniqueness via `uq_forecasts_run_station_target(run_id, station_id, target_time)`.
-
----
-
-## 2. Hard Mode Separation (`prospective_shadow` vs `retrospective_replay`)
-
-1. **`generate_prospective_shadow_forecasts(...)` (`evaluation_mode = "prospective_shadow"`):**
-   - Inspects actual `datetime.now(UTC)` BEFORE generation AND immediately prior to `session.commit()`.
-   - Queries `observations` for any existing measurement matching `target_time`.
-   - Raises `ValueError("Backdated prospective violation: ...")` and rolls back whenever `actual_generated_at >= target_time`, `actual_persisted_at >= target_time`, OR target truth already exists in DB.
-2. **`generate_retrospective_replay_forecasts(...)` (`evaluation_mode = "retrospective_replay"`):**
-   - Supports historical Q1 2024 replay auditing strictly using `PointInTimeReplayEngine(mode="prospective")` input filtering as-of `decision_cutoff`, while still recording real wall-clock `generated_at` and `persisted_at`.
-   - Isolated under `"retrospective_summary"` and `retrospective_run_count`; **never mixed** into prospective evaluation metrics or promotion gates.
-3. **Evaluation-Time Tamper Quarantine:** [`reconcile_shadow_evaluation`](../src/sensorguard/shadow_eval.py) checks every `prospective_shadow` row for `(generated_at < target_time) & (persisted_at < target_time) & (matched_obs.persisted_at > rec.persisted_at)`. Any violating row increments `backdated_violation_count`, is excluded from prospective metrics, and forces `calibration_claim_eligible = False`.
+| `training_completed_at` | Actual UTC time shadow suite fit & calibration finished | `training_data_availability_cutoff <= calibration_availability_cutoff <= training_completed_at <= generated_at` |
+| `decision_cutoff` | Declared end of causal telemetry window visible via `PointInTimeReplayEngine` | `decision_cutoff <= target_time - 1h` |
+| `target_time` | Verification hour (`decision_cutoff + 1h`) | Absent from DB `observations` before generation AND commit |
+| `generated_at` | Actual UTC wall-clock inference start time | `(target_time - generated_at).total_seconds() >= min_lead_seconds` |
+| `persisted_at` | Actual UTC wall-clock transaction commit time | `(target_time - persisted_at).total_seconds() >= min_lead_seconds` (`> 0`); `obs.persisted_at > persisted_at` |
+| `effective_lead_seconds` | Actual lead remaining at DB commit: `(target_time - persisted_at).total_seconds()` | Strictly positive (`>= min_lead_seconds`, default **`300.0`s / 5 minutes**) |
+| `available_at_decision_cutoff` | Boolean truthfulness flag (`persisted_at <= decision_cutoff`) | Strictly `False` whenever generated or persisted after `decision_cutoff` (counted separately under `post_cutoff_pre_target_count`) |
 
 ---
 
-## 3. Required Prospective Evidence & Promotion Gate (`reconcile_shadow_evaluation`)
+## 3. Hard Mode Separation & Evaluation-Time Quarantine
 
-Prospective eligibility (`calibration_claim_eligible = True`) requires ALL of:
-- Zero backdated violations (`backdated_violation_count == 0`).
-- Minimum matched outcomes: `matched_count >= 100` (`min_matched_outcomes=100`).
-- Minimum independent horizon span: `unique_target_hours >= 24` (`min_unique_hours=24`, recommended `>= 168` hours / 7 days prior to live promotion sign-off).
-
-Full output reported per model (`persisted_picp`, 95% Wilson CI, 400-bootstrap station-day block CI `published_picp_block_ci95`, `published_mpiw`, `published_winkler`, `mae`, `d_sens_mean`, `publication_availability`, `freshness` mean/max source age, `delayed_arrival_count`, `missing_label_rate`, `data_quality_incident_count`, `provider_incident_count`, `high_pollution` subgroup `>= max(15.0, p75)`, `long_outage` subgroup `age_hours >= 6.0`, and paired matched-availability deltas vs `LOCALLY-WEIGHTED-MAR`, `PERSISTENCE-SPLIT`, and `LIGHTGBM-CQR`).
-
-**Anti-Promotion Rule:** `adaptive_sage_promotion_eligible` remains **`False`** unless `calibration_claim_eligible` holds AND `ADAPTIVE-SAGE-LIGHTGBM` strictly beats `LOCALLY-WEIGHTED-MAR` on paired common-published Winkler without degrading coverage.
+1. **`generate_prospective_shadow_forecasts(..., min_lead_seconds=300.0)`:** Enforces positive minimum lead both before estimation and immediately before `session.commit()`, handles concurrent worker races on `idempotency_key` cleanly, and aborts if a concurrent poll persists target truth mid-inference.
+2. **`generate_retrospective_replay_forecasts(...)` (`evaluation_mode = "retrospective_replay"`):** Explicitly isolated under `"retrospective_summary"` and `retrospective_run_count`; never mixed into prospective metrics or calibration gates.
+3. **`reconcile_shadow_evaluation()` Quarantine Counters:** Audits every `prospective_shadow` record for pinned byte SHA-256 (`artifact_violation_count`), causality (`backdated_violation_count`), and effective lead >= `min_lead_seconds` (`lead_time_violation_count`). Any violation blocks `calibration_claim_eligible` and sets `artifact_integrity_verified = False`.
+4. **Promotion Gate:** `calibration_claim_eligible` requires zero backdated/lead/artifact violations, `matched_count >= 100`, and `unique_target_hours >= 24` (`>= 168` hours / 7 continuous days required prior to live promotion). `adaptive_sage_promotion_eligible` remains **`False`** unless `calibration_claim_eligible` holds AND `ADAPTIVE-SAGE-LIGHTGBM` strictly outperforms `LOCALLY-WEIGHTED-MAR` on paired common-published Winkler.
