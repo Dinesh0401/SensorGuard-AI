@@ -13,6 +13,7 @@ from sensorguard.audit import audit_candidate_location
 from sensorguard.db.session import get_session_factory, init_db
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.ingest import IngestionPipeline
+from sensorguard.preflight import STAGE1_HARD_MAX_ATTEMPTS, Stage1PreflightConfig, run_stage1_preflight
 from sensorguard.providers import OpenAQClient
 from sensorguard.replay import PointInTimeReplayEngine
 from sensorguard.simulation import OutageConfig
@@ -107,6 +108,35 @@ def _run_replay(args: argparse.Namespace) -> None:
             print(df[["sensor_id", "observed_at", "value", "unit", "quality_flag"]].tail(10).to_string())
 
 
+def _run_preflight_stations(args: argparse.Namespace) -> None:
+    if not 1 <= int(args.max_attempts) <= STAGE1_HARD_MAX_ATTEMPTS:
+        print(
+            json.dumps(
+                {
+                    "status": "INVALID_ARGUMENTS",
+                    "error": f"--max-attempts must be between 1 and {STAGE1_HARD_MAX_ATTEMPTS}.",
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    cfg = Stage1PreflightConfig(
+        execute_once=bool(args.execute_once),
+        max_attempts=int(args.max_attempts),
+        max_daily_quota=int(args.daily_cap),
+        recent_hours=float(args.recent_hours),
+        authorized_by=args.authorized_by,
+        output_path=args.output,
+        write_artifact=not bool(args.no_artifact),
+    )
+    report = run_stage1_preflight(get_session_factory(), config=cfg)
+    print(json.dumps(report, indent=2, default=str))
+    if str(report.get("status", "")).startswith(("BLOCKED_", "ABORTED_")):
+        sys.exit(2)
+
+
 def _load_local_env() -> None:
     """Load key-value pairs from local .env if present and not already set."""
     env_file = Path(".env")
@@ -160,6 +190,43 @@ def main() -> None:
     p_replay.add_argument("--mode", choices=["prospective", "retrospective"], default="prospective")
     p_replay.add_argument("--delay-hours", type=float, default=1.0)
     p_replay.set_defaults(func=_run_replay)
+
+    # preflight-stations (Stage 1 strictly bounded one-time availability check)
+    p_preflight = subparsers.add_parser(
+        "preflight-stations",
+        help="Stage 1 one-time bounded availability check for the 8 archived UK OpenAQ locations (dry-run default)",
+    )
+    p_preflight.add_argument(
+        "--execute-once",
+        action="store_true",
+        help="Actually issue bounded Stage 1 OpenAQ HTTP requests (default is 0-network dry-run)",
+    )
+    p_preflight.add_argument(
+        "--max-attempts",
+        type=int,
+        default=STAGE1_HARD_MAX_ATTEMPTS,
+        help="Hard cap on total HTTP attempts including retries (1..16, default 16)",
+    )
+    p_preflight.add_argument("--daily-cap", type=int, default=48, help="Daily OpenAQ quota cap (default 48)")
+    p_preflight.add_argument(
+        "--recent-hours",
+        type=float,
+        default=48.0,
+        help="Recency window in hours for active PM2.5 confirmation (default 48)",
+    )
+    p_preflight.add_argument(
+        "--authorized-by",
+        type=str,
+        default=None,
+        help="Non-default operator identity authorizing Stage 1 execution",
+    )
+    p_preflight.add_argument("--output", type=Path, default=None, help="Optional JSON artifact output path")
+    p_preflight.add_argument(
+        "--no-artifact",
+        action="store_true",
+        help="Do not write JSON report artifact to disk",
+    )
+    p_preflight.set_defaults(func=_run_preflight_stations)
 
     args = parser.parse_args()
     args.func(args)
