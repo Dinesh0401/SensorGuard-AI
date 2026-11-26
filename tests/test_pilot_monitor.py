@@ -229,7 +229,7 @@ def test_durable_quota_across_restarts_and_worker_concurrency(tmp_path) -> None:
     from sqlalchemy import create_engine, event, select
     from sqlalchemy.orm import sessionmaker
 
-    from sensorguard.db.schema import Base, PilotQuotaState
+    from sensorguard.db.schema import Base
 
     db_file = tmp_path / "durable_quota.db"
     db_url = f"sqlite:///{db_file}"
