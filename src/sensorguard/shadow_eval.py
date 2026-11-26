@@ -651,7 +651,8 @@ def _evaluate_shadow_subset(
             )
             or 0
         )
-    except Exception:
+    except SQLAlchemyError as exc:
+        logger.debug("PilotIngestAuditRun unavailable during shadow evaluation: %s", exc)
         provider_incident_count = 0
 
     by_algo: dict[str, list[ForecastRecord]] = {}

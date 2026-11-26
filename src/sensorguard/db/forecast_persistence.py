@@ -54,14 +54,25 @@ def materialize_station_forecasts(
         pm25_sensors = {s.station_id: s.id for s in session.scalars(select(Sensor)).all()}
 
     max_ts = _to_utc(featured_df["timestamp"].max()) or datetime.now(UTC)
+    now_ts = datetime.now(UTC)
+    run_idem_key = hashlib.sha256(
+        f"serving:{manifest.model_id}:{manifest.version}:{manifest.sha256}:{max_ts.isoformat()}:{now_ts.isoformat()}".encode()
+    ).hexdigest()
     run = ForecastRun(
         model_id=manifest.model_id,
         model_version=manifest.version,
         model_sha256=manifest.sha256,
         dataset_hash=manifest.dataset_hash,
         algorithm=manifest.algorithm,
+        execution_mode="serving",
+        evaluation_mode="serving",
+        model_created_at=manifest.created_at,
+        artifact_immutable_ref=f"{manifest.model_id}@{manifest.version}#{manifest.sha256[:12]}",
+        idempotency_key=run_idem_key,
         nominal_coverage=float(manifest.nominal_coverage),
-        issued_at=datetime.now(UTC),
+        issued_at=now_ts,
+        generated_at=now_ts,
+        persisted_at=now_ts,
         decision_cutoff=max_ts,
         notes=notes,
     )
@@ -131,6 +142,7 @@ def materialize_station_forecasts(
                 lower_val = round(float(sage_res.lower_envelope[i]), 4)
                 upper_val = round(float(sage_res.upper_envelope[i]), 4)
 
+            rec_ts = datetime.now(UTC)
             rec = ForecastRecord(
                 run_id=run.id,
                 station_id=st_id,
@@ -147,7 +159,9 @@ def materialize_station_forecasts(
                 newest_source_observed_at=newest_obs_at,
                 feature_hash=feature_hash,
                 scenario_bounds_json=json.dumps(scenario_bounds, sort_keys=True),
-                created_at=datetime.now(UTC),
+                generated_at=now_ts,
+                persisted_at=rec_ts,
+                created_at=rec_ts,
             )
             session.add(rec)
 

@@ -42,6 +42,8 @@ class ModelRegistryEntry:
     nominal_coverage: float
     artifact_path: str | None
     sha256: str | None
+    model_created_at: str | None
+    artifact_immutable_ref: str
     promotion_status_note: str
 
 
@@ -55,6 +57,7 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
     )
     primary_id = manifest.model_id if manifest else "sage_pilot_q1_2024"
     primary_ver = manifest.version if manifest else "1.0.0"
+    primary_created_at = manifest.created_at if manifest else "2026-11-25T04:08:50.393371+00:00"
     dataset_hash = manifest.dataset_hash if manifest else "33805c42097fc86e"
 
     entries = [
@@ -69,6 +72,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             nominal_coverage=0.90,
             artifact_path="artifacts/models/sage_pilot_q1_2024.joblib",
             sha256=primary_sha,
+            model_created_at=primary_created_at,
+            artifact_immutable_ref=f"{primary_id}@{primary_ver}#{primary_sha[:12]}",
             promotion_status_note=(
                 "Active FastAPI serving artifact (Static SAGEForecaster). Uses globally "
                 "calibrated sensitivity bounds; D_sensitivity is constant (~3.32 ug/m^3) across "
@@ -86,6 +91,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             nominal_coverage=0.90,
             artifact_path=None,
             sha256=None,
+            model_created_at="2026-11-25T16:35:05+00:00",
+            artifact_immutable_ref=f"sage_adaptive_q1_2024@2.0.0-shadow-m77#data_{dataset_hash[:12]}",
             promotion_status_note=(
                 "Shadow research candidate ONLY (NOT served by primary API). M7.7 causal audit "
                 "(SG-M77-ADAPTIVE-20261125-163505) showed natural Spearman rho=+0.1749 (<0.20 "
@@ -103,6 +110,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             nominal_coverage=0.90,
             artifact_path=None,
             sha256=None,
+            model_created_at="2026-11-25T16:35:05+00:00",
+            artifact_immutable_ref=f"locally_weighted_mar_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
             promotion_status_note=(
                 "Shadow baseline isolating causal forward-OOF local error scale s(x) under "
                 "MAR (gamma=0.0); achieved best LightGBM-family Winkler in natural (8.72) and LOSO (4.63)."
@@ -119,6 +128,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             nominal_coverage=0.90,
             artifact_path=None,
             sha256=None,
+            model_created_at="2026-11-25T16:35:05+00:00",
+            artifact_immutable_ref=f"lightgbm_cqr_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
             promotion_status_note="Shadow quantile baseline (Romano et al. 2019).",
         ),
         ModelRegistryEntry(
@@ -132,19 +143,23 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             nominal_coverage=0.90,
             artifact_path=None,
             sha256=None,
+            model_created_at="2026-11-25T16:35:05+00:00",
+            artifact_immutable_ref=f"persistence_split_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
             promotion_status_note="Shadow persistence reference baseline (natural Winkler 3.16).",
         ),
     ]
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "serving_policy": (
             "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). "
             "AdaptiveSAGEForecaster and baselines run strictly in offline/shadow evaluation until "
-            "live matched-outcome criteria are satisfied and operator promotion is approved."
+            "prospective matched-outcome criteria are satisfied and operator promotion is approved."
         ),
         "primary_model_id": primary_id,
         "primary_model_class": "SAGEForecaster",
+        "primary_model_created_at": primary_created_at,
+        "primary_artifact_immutable_ref": f"{primary_id}@{primary_ver}#{primary_sha[:12]}",
         "adaptive_sage_promoted": False,
         "allowed_data_modes": list(ALLOWED_DATA_MODES),
         "models": [asdict(e) for e in entries],
