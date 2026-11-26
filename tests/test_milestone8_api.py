@@ -186,17 +186,36 @@ def test_pilot_readiness_endpoint_fail_closed_default_and_migrated_db(tmp_path: 
             r2 = client.get("/api/v1/pilot/readiness")
             assert r2.status_code == 200
             d2 = r2.json()
-            assert d2["control_source"] == "database_006"
+            assert d2["control_source"] == "database_control"
             assert d2["kill_switch_active"] is True
             assert d2["opt_in_enabled"] is False
             assert d2["requests_remaining"] == 48
             assert d2["station_metadata_audit"]["total_stations"] == 2
-            assert d2["shadow_evaluation_summary"]["status"] == "NO_SHADOW_RUNS"
+            assert d2["shadow_evaluation_summary"]["status"] == "NO_PROSPECTIVE_SHADOW_RUNS"
 
         with sf() as s_fc:
             fc_res = _compute_station_forecasts_sync(st_id, 4, get_serving_model(), session=s_fc)
             assert len(fc_res.forecasts) > 0
             assert "SAGEForecaster" in fc_res.forecasts[0].model_version
+            assert fc_res.forecasts[0].generated_at is not None
+
+        # 3. Verify server-side multi-worker rate limiting persists in DB & returns HTTP 429
+        import os
+
+        prev_cap = os.environ.get("SENSORGUARD_PILOT_API_RATE_LIMIT_PER_MIN")
+        os.environ["SENSORGUARD_PILOT_API_RATE_LIMIT_PER_MIN"] = "2"
+        try:
+            with TestClient(app) as client:
+                # 1st already ran above against current minute bucket (count=1), 2nd allowed, 3rd -> 429!
+                assert client.get("/api/v1/pilot/readiness").status_code == 200
+                r_429 = client.get("/api/v1/pilot/readiness")
+                assert r_429.status_code == 429
+                assert r_429.headers.get("retry-after") == "60"
+        finally:
+            if prev_cap is None:
+                os.environ.pop("SENSORGUARD_PILOT_API_RATE_LIMIT_PER_MIN", None)
+            else:
+                os.environ["SENSORGUARD_PILOT_API_RATE_LIMIT_PER_MIN"] = prev_cap
     finally:
         app.dependency_overrides.clear()
         invalidate_pilot_feature_cache()

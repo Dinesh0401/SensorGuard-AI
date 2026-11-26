@@ -26,11 +26,14 @@ from sensorguard.pilot_monitor import (
     DurablePilotQuotaTracker,
     PilotQuotaTracker,
     acquire_poll_lease,
+    ensure_default_control_state,
     inspect_station_provider_metadata,
     reconcile_delayed_ground_truth,
     release_poll_lease,
+    renew_poll_lease,
     run_bounded_opt_in_poll,
     set_polling_kill_switch,
+    verify_fencing_token,
 )
 
 
@@ -87,7 +90,35 @@ def test_opt_in_poll_blocks_default_and_enforces_daily_quota(tmp_path):
     transport = httpx.MockTransport(mock_handler)
     quota = PilotQuotaTracker(max_requests_per_day=1)
 
-    # 1. Opt-out prevents any request
+    # 1. Fail-closed absent/default PilotControlState blocks even when config.opt_in_enabled=True
+    res_locked = run_bounded_opt_in_poll(
+        session_factory=factory,
+        config=BoundedPilotConfig(opt_in_enabled=True, max_requests_per_day=1),
+        quota=quota,
+        transport=transport,
+        now_utc=now_t,
+    )
+    assert res_locked["status"] == "SKIPPED_KILL_SWITCH"
+    assert len(calls) == 0
+
+    # Non-default operator identity required to authorize polling
+    import pytest as _pytest
+
+    with factory() as sess:
+        with _pytest.raises(ValueError, match="Non-default operator"):
+            set_polling_kill_switch(
+                sess, kill_switch_active=False, updated_by="system_default", now_utc=now_t
+            )
+        set_polling_kill_switch(
+            sess,
+            kill_switch_active=False,
+            opt_in_enabled=True,
+            reason="Operator approved unit test",
+            updated_by="pilot_operator",
+            now_utc=now_t,
+        )
+
+    # 2. Config opt-out still prevents any request even when DB unlocked
     res_off = run_bounded_opt_in_poll(
         session_factory=factory,
         config=BoundedPilotConfig(opt_in_enabled=False),
@@ -98,20 +129,26 @@ def test_opt_in_poll_blocks_default_and_enforces_daily_quota(tmp_path):
     assert res_off["status"] == "SKIPPED_OPT_OUT"
     assert len(calls) == 0
 
-    # 2. First opt-in call succeeds within 1-request budget and passes bounded lookback window
+    # 3. First authorized opt-in call succeeds within 1-request budget and passes bounded lookback window
     res_on = run_bounded_opt_in_poll(
         session_factory=factory,
-        config=BoundedPilotConfig(opt_in_enabled=True, lookback_hours=48, max_requests_per_day=1),
+        config=BoundedPilotConfig(
+            opt_in_enabled=True,
+            lookback_hours=48,
+            max_requests_per_day=1,
+            max_retries_per_request=0,
+        ),
         quota=quota,
         transport=transport,
         now_utc=now_t,
     )
     assert res_on["status"] == "SUCCESS"
     assert res_on["records_inserted"] == 1
+    assert res_on["http_attempts"] == 1
     assert len(calls) == 1
     assert "datetime_from=2026-02-27T12%3A00%3A00Z" in calls[0]
 
-    # 3. Second call same UTC day hits daily quota limit cleanly without issuing HTTP call
+    # 4. Second call same UTC day hits daily quota limit cleanly without issuing HTTP call
     res_exhausted = run_bounded_opt_in_poll(
         session_factory=factory,
         config=BoundedPilotConfig(opt_in_enabled=True, max_requests_per_day=1),
@@ -299,7 +336,6 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     from sqlalchemy.orm import sessionmaker
 
     from sensorguard.db.schema import Base, Observation, Sensor, Station
-    from sensorguard.pilot_monitor import ensure_default_control_state
 
     eng = create_engine(f"sqlite:///{tmp_path / 'lease_audit.db'}", future=True)
     Base.metadata.create_all(eng)
@@ -349,9 +385,9 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
         allowed_location_ids=(154,),
         lookback_hours=24,
         max_requests_per_day=10,
+        max_retries_per_request=1,
         lease_ttl_seconds=15,
         worker_id="worker-active",
-        require_db_unlock_for_live=True,
     )
     blocked = run_bounded_opt_in_poll(
         sf,
@@ -361,14 +397,29 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     )
     assert blocked["status"] == "SKIPPED_KILL_SWITCH"
 
-    # 2. Unlock DB control, verify environment kill switch still overrides fail-closed
+    # Negative security check: tampering DB row kill_switch_active=False WITHOUT authorized_at fails closed
+    with sf() as sess:
+        c_row = ensure_default_control_state(sess, now_utc=now)
+        c_row.kill_switch_active = False
+        c_row.opt_in_enabled = True
+        c_row.authorized_at = None
+        sess.commit()
+    tamper_blocked = run_bounded_opt_in_poll(
+        sf,
+        cfg,
+        transport=httpx.MockTransport(_ok_transport),
+        now_utc=now,
+    )
+    assert tamper_blocked["status"] == "SKIPPED_KILL_SWITCH"
+
+    # 2. Unlock DB control properly, verify environment kill switch still overrides fail-closed
     with sf() as sess:
         set_polling_kill_switch(
             sess,
             kill_switch_active=False,
             opt_in_enabled=True,
             reason="Offline mock transport test unlocked",
-            updated_by="pytest",
+            updated_by="pytest_operator",
             now_utc=now,
         )
     monkeypatch.setenv("SENSORGUARD_POLLING_KILL_SWITCH", "true")
@@ -383,14 +434,16 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
 
     # 3. Active leader lease blocks competing worker; expired lease recovers automatically
     with sf() as sess:
-        acquired, recovered = acquire_poll_lease(
+        acq_crash = acquire_poll_lease(
             sess,
             holder_id="crashed-worker",
             lease_name=cfg.lease_name,
             ttl_seconds=15,
             now_utc=now - timedelta(seconds=5),
         )
-        assert (acquired, recovered) == (True, False)
+        assert acq_crash.acquired is True
+        assert acq_crash.recovered_from_expired_lease is False
+        assert acq_crash.fencing_token == 1
 
     contended = run_bounded_opt_in_poll(
         sf,
@@ -400,7 +453,7 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     )
     assert contended["status"] == "SKIPPED_NO_LEASE"
 
-    # 4. After lease expires (+30s), worker recovers lease and handles HTTP 429 cleanly
+    # 4. After lease expires (+30s), worker recovers lease (token=2) and counts BOTH 429 retry attempts!
     def _rate_limit_transport(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, headers={"Retry-After": "0.01"}, json={"detail": "rate limit"})
 
@@ -413,6 +466,9 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     )
     assert res_429["status"] == "HTTP_429_BACKOFF"
     assert res_429["recovered_from_expired_lease"] is True
+    assert res_429["fencing_token"] == 2
+    assert res_429["http_attempts"] == 2  # initial attempt + 1 retry BOTH counted in quota!
+    assert res_429["requests_used_today"] == 2
 
     # 5. Bounded historical reconciliation + append-only revision on upstream value update
     payload_v1 = {
@@ -478,9 +534,18 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
 
         lease_row = sess.scalars(select(PilotPollLease)).first()
         assert lease_row is not None and lease_row.holder_id is None
-        acquired_m, _ = acquire_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now)
-        assert acquired_m is True
-        assert release_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now) is True
+        acq_m = acquire_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now)
+        assert acq_m.acquired is True and acq_m.fencing_token == 1
+        assert (
+            release_poll_lease(
+                sess,
+                holder_id="manual-op",
+                fencing_token=acq_m.fencing_token,
+                lease_name="manual",
+                now_utc=now,
+            )
+            is True
+        )
 
         audits = list(sess.scalars(select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id))).all())
         statuses = {a.status for a in audits}
@@ -562,4 +627,254 @@ def test_inspect_station_provider_metadata_offline(tmp_path) -> None:
         assert by_loc[141]["licenses"] == ["ODC-BY"]
         assert by_loc[141]["was_active_at_fetch_snapshot"] is False
         assert by_loc[141]["current_live_status"] == "UNVERIFIED_OFFLINE_MODE"
+    eng.dispose()
+
+
+def test_per_attempt_quota_counts_retries_5xx_429_timeouts_and_midnight_rollover(tmp_path) -> None:
+    """Every HTTP attempt (timeouts, 5xx, 429, retries) consumes shared durable quota before I/O."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import PilotIngestAuditRun
+
+    eng, sf = _setup_sqlite_pilot(tmp_path)
+    day1 = datetime(2026, 3, 1, 23, 55, 0, tzinfo=UTC)
+    with sf() as sess:
+        set_polling_kill_switch(
+            sess,
+            kill_switch_active=False,
+            opt_in_enabled=True,
+            reason="Retry storm quota test",
+            updated_by="pytest_operator",
+            now_utc=day1,
+        )
+
+    attempt_events: list[str] = []
+
+    def _storm_handler(request: httpx.Request) -> httpx.Response:
+        idx = len(attempt_events)
+        attempt_events.append(f"call-{idx}")
+        if idx == 0:
+            raise httpx.ReadTimeout("simulated timeout", request=request)
+        if idx == 1:
+            return httpx.Response(503, json={"detail": "upstream unavailable"})
+        if idx == 2:
+            return httpx.Response(429, headers={"Retry-After": "0.01"}, json={"detail": "rate limit"})
+        raise AssertionError("Quota should have aborted attempt 4 before issuing HTTP call")
+
+    cfg = BoundedPilotConfig(
+        opt_in_enabled=True,
+        allowed_location_ids=(141,),
+        lookback_hours=24,
+        max_requests_per_day=3,
+        max_retries_per_request=3,  # Would make 4 total calls if uncapped!
+        worker_id="storm-worker",
+    )
+    res = run_bounded_opt_in_poll(
+        session_factory=sf,
+        config=cfg,
+        transport=httpx.MockTransport(_storm_handler),
+        now_utc=day1,
+    )
+    assert res["status"] == "QUOTA_EXHAUSTED"
+    assert len(attempt_events) == 3  # Blocked BEFORE 4th wire attempt!
+    assert res["http_attempts"] == 3
+    assert res["requests_used_today"] == 3
+    assert res["requests_remaining"] == 0
+
+    # Verify durable persistence across fresh engine/session & rollover at UTC midnight
+    eng.dispose()
+    eng2 = create_engine(f"sqlite:///{tmp_path / 'pilot_m75.db'}", future=True)
+    sf2 = sessionmaker(bind=eng2, expire_on_commit=False)
+    tracker = DurablePilotQuotaTracker(provider="openaq", max_requests_per_day=3)
+
+    with sf2() as s2:
+        assert tracker.get_usage(s2, now_utc=day1) == (3, 0)
+        latest_audit = s2.scalars(select(PilotIngestAuditRun)).first()
+        assert latest_audit is not None and latest_audit.http_attempts == 3
+
+    day2 = day1 + timedelta(minutes=10)  # 00:05 UTC next day!
+    res_day2 = run_bounded_opt_in_poll(
+        session_factory=sf2,
+        config=cfg,
+        transport=httpx.MockTransport(
+            lambda _r: httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {
+                            "datetime": {"utc": "2026-03-01T23:00:00Z"},
+                            "value": 11.2,
+                            "parameter": {"name": "pm25", "units": "µg/m³"},
+                        }
+                    ]
+                },
+            )
+        ),
+        now_utc=day2,
+    )
+    assert res_day2["status"] == "SUCCESS"
+    assert res_day2["requests_used_today"] == 1
+    assert res_day2["requests_remaining"] == 2
+    eng2.dispose()
+
+
+def test_renewable_lease_heartbeat_and_stale_fencing_prevents_commit(tmp_path) -> None:
+    """Verify heartbeat extends active lease across long runs and stale workers fail fencing check."""
+    from sqlalchemy import create_engine, func
+    from sqlalchemy.orm import sessionmaker
+
+    from sensorguard.db.schema import Base, Observation, Sensor, Station
+
+    eng = create_engine(f"sqlite:///{tmp_path / 'fencing.db'}", future=True)
+    Base.metadata.create_all(eng)
+    sf = sessionmaker(bind=eng, autoflush=False, autocommit=False)
+    t0 = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+
+    with sf() as sess:
+        st1 = Station(
+            provider="openaq",
+            provider_location_id=154,
+            name="Station One",
+            latitude=51.5,
+            longitude=-0.1,
+            country="GB",
+        )
+        st2 = Station(
+            provider="openaq",
+            provider_location_id=157,
+            name="Station Two",
+            latitude=51.4,
+            longitude=0.1,
+            country="GB",
+        )
+        sess.add_all([st1, st2])
+        sess.flush()
+        sess.add_all(
+            [
+                Sensor(station_id=st1.id, provider_sensor_id=246, parameter="pm25"),
+                Sensor(station_id=st2.id, provider_sensor_id=254, parameter="pm25"),
+            ]
+        )
+        set_polling_kill_switch(
+            sess,
+            kill_switch_active=False,
+            opt_in_enabled=True,
+            reason="Fencing test unlock",
+            updated_by="pytest_operator",
+            now_utc=t0,
+        )
+
+    # 1. Long job exceeding initial 10s TTL succeeds via heartbeat renewal between sensors
+    clock_a = [t0]
+    h_obs = t0 - timedelta(hours=1)
+
+    def _slow_ok_transport(_req: httpx.Request) -> httpx.Response:
+        clock_a[0] = clock_a[0] + timedelta(seconds=6)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "datetime": {"utc": h_obs.strftime("%Y-%m-%dT%H:%M:%SZ")},
+                        "value": 14.0,
+                        "parameter": {"name": "pm25", "units": "µg/m³"},
+                    }
+                ]
+            },
+        )
+
+    cfg_a = BoundedPilotConfig(
+        opt_in_enabled=True,
+        allowed_location_ids=(154, 157),
+        lease_ttl_seconds=10,
+        worker_id="worker-healthy",
+    )
+    res_ok = run_bounded_opt_in_poll(
+        sf,
+        cfg_a,
+        transport=httpx.MockTransport(_slow_ok_transport),
+        now_utc=t0,
+        lease_clock=lambda: clock_a[0],
+    )
+    assert res_ok["status"] == "SUCCESS"
+    assert res_ok["sensors_polled"] == 2
+    assert res_ok["records_inserted"] == 2
+
+    # 2. Stale stalled worker wakes up AFTER lease expired & preempted -> MUST abort without commit!
+    clock_b = [t0 + timedelta(hours=1)]
+    hijack_done = False
+
+    def _stall_and_preempt_transport(_req: httpx.Request) -> httpx.Response:
+        nonlocal hijack_done
+        if not hijack_done:
+            hijack_done = True
+            # Stall past 10s TTL so competing worker steals lease with higher fencing_token!
+            clock_b[0] = clock_b[0] + timedelta(seconds=20)
+            with sf() as hijack_sess:
+                acq2 = acquire_poll_lease(
+                    hijack_sess,
+                    holder_id="worker-preemptor",
+                    lease_name="fencing_test_lease",
+                    ttl_seconds=30,
+                    now_utc=clock_b[0],
+                )
+                assert acq2.acquired is True
+                assert acq2.recovered_from_expired_lease is True
+                assert acq2.fencing_token > 1
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "datetime": {"utc": (clock_b[0] - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")},
+                        "value": 99.0,  # Stale write MUST be fenced off and rolled back!
+                        "parameter": {"name": "pm25", "units": "µg/m³"},
+                    }
+                ]
+            },
+        )
+
+    cfg_b = BoundedPilotConfig(
+        opt_in_enabled=True,
+        allowed_location_ids=(154,),
+        lease_name="fencing_test_lease",
+        lease_ttl_seconds=10,
+        worker_id="worker-stalled",
+    )
+    res_fenced = run_bounded_opt_in_poll(
+        sf,
+        cfg_b,
+        transport=httpx.MockTransport(_stall_and_preempt_transport),
+        now_utc=clock_b[0],
+        lease_clock=lambda: clock_b[0],
+    )
+    assert res_fenced["status"] == "SKIPPED_STALE_FENCING_TOKEN"
+    assert res_fenced["records_persisted"] == 0
+
+    with sf() as sess:
+        # Stalled value 99.0 NEVER committed to observations; total rows stay at 2 from test step 1!
+        assert sess.scalar(select(func.count(Observation.id))) == 2
+        # Preemptor worker still holds active lease cleanly (stalled worker could not release it!)
+        assert (
+            verify_fencing_token(
+                sess,
+                holder_id="worker-preemptor",
+                fencing_token=2,
+                lease_name="fencing_test_lease",
+                now_utc=clock_b[0],
+            )
+            is True
+        )
+        # Verify renew_poll_lease rejects stale token directly too
+        assert (
+            renew_poll_lease(
+                sess,
+                holder_id="worker-stalled",
+                fencing_token=1,
+                lease_name="fencing_test_lease",
+                now_utc=clock_b[0],
+            )
+            is False
+        )
     eng.dispose()

@@ -597,7 +597,9 @@ def _evaluate_shadow_subset(
         }
 
     runs_by_id = {r.id: r for r in shadow_runs}
-    records = list(session.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_(list(runs_by_id)))).all())
+    records = list(
+        session.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_(list(runs_by_id)))).all()
+    )
     if not records:
         return {
             "status": f"NO_{evaluation_mode.upper()}_RECORDS",
