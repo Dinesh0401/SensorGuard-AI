@@ -80,9 +80,10 @@ jobs:
           npm run build
           npx playwright install --with-deps chromium
 
-      - name: Seed SQLite pilot database for E2E backend
+      - name: Seed and migrate SQLite pilot database for E2E backend
         run: |
           python scripts/seed_pilot_db.py
+          alembic upgrade head
 
       - name: Run Playwright E2E against live FastAPI + built web export
         run: |

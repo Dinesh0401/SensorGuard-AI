@@ -221,8 +221,8 @@ export default function StagingDashboard() {
           h.status === "abstain"
             ? "stale_sensor_history"
             : h.status === "caution"
-            ? "moderate_scenario_disagreement"
-            : "sufficient_evidence",
+              ? "moderate_scenario_disagreement"
+              : "sufficient_evidence",
         is_stale: h.status === "abstain",
         scenario_bounds: [
           { gamma: 0.0, lower: h.point_pred - 6.6, upper: h.point_pred + 6.6 },
@@ -385,18 +385,16 @@ export default function StagingDashboard() {
             mode={pilotReadiness?.operational_data_mode ?? modelStatus?.operational_data_mode ?? "archived_historical"} • Active: {modelStatus?.model_class ?? "SAGEForecaster"}
           </span>
           <span
-            className={`px-2 py-0.5 rounded border text-[11px] font-mono flex items-center gap-1.5 ${
-              isDemoMode
+            className={`px-2 py-0.5 rounded border text-[11px] font-mono flex items-center gap-1.5 ${isDemoMode
                 ? "bg-indigo-500/20 text-indigo-200 border-indigo-500/40"
                 : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-            }`}
+              }`}
           >
             <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                isDemoMode
+              className={`w-1.5 h-1.5 rounded-full ${isDemoMode
                   ? "bg-indigo-400"
                   : "bg-emerald-400 animate-pulse"
-              }`}
+                }`}
             ></span>
             {isDemoMode ? "Demo Mode (Offline Fixtures)" : "FastAPI Connected"}
           </span>
@@ -465,33 +463,30 @@ export default function StagingDashboard() {
           <button
             type="button"
             onClick={() => setActiveTab("forecast")}
-            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
-              activeTab === "forecast"
+            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${activeTab === "forecast"
                 ? "bg-indigo-600 text-white shadow"
                 : "text-slate-400 hover:text-slate-200"
-            }`}
+              }`}
           >
             <Activity className="w-3.5 h-3.5" /> Station Forecasts & Map
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("benchmarks")}
-            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
-              activeTab === "benchmarks"
+            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${activeTab === "benchmarks"
                 ? "bg-indigo-600 text-white shadow"
                 : "text-slate-400 hover:text-slate-200"
-            }`}
+              }`}
           >
             <FlaskConical className="w-3.5 h-3.5" /> Simulator Lab & Ablations
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("methodology")}
-            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${
-              activeTab === "methodology"
+            className={`px-3 py-1.5 rounded-md transition font-medium text-xs flex items-center gap-1.5 ${activeTab === "methodology"
                 ? "bg-indigo-600 text-white shadow"
                 : "text-slate-400 hover:text-slate-200"
-            }`}
+              }`}
           >
             <Info className="w-3.5 h-3.5" /> SAGE Methodology
           </button>
@@ -541,8 +536,8 @@ export default function StagingDashboard() {
                           st.status === "HEALTHY"
                             ? "bg-emerald-500"
                             : st.status === "LATE"
-                            ? "bg-amber-500"
-                            : "bg-rose-500";
+                              ? "bg-amber-500"
+                              : "bg-rose-500";
 
                         return (
                           <button
@@ -551,9 +546,8 @@ export default function StagingDashboard() {
                             aria-label={`Select ${st.name}, status ${st.status}`}
                             onClick={() => setSelectedStationId(st.id)}
                             style={{ left: `${coords.x}%`, top: `${coords.y}%` }}
-                            className={`absolute -translate-x-1/2 -translate-y-1/2 group transition-transform ${
-                              isSelected ? "scale-125 z-20" : "hover:scale-110 z-10"
-                            }`}
+                            className={`absolute -translate-x-1/2 -translate-y-1/2 group transition-transform ${isSelected ? "scale-125 z-20" : "hover:scale-110 z-10"
+                              }`}
                             title={`${st.name} (${st.status}) - Lat: ${st.latitude.toFixed(3)}, Lon: ${st.longitude.toFixed(3)}`}
                           >
                             <div className="relative flex items-center justify-center">
@@ -593,11 +587,10 @@ export default function StagingDashboard() {
                             key={st.id}
                             type="button"
                             onClick={() => setSelectedStationId(st.id)}
-                            className={`w-full text-left px-3 py-2.5 rounded-lg border transition flex items-center justify-between ${
-                              isSelected
+                            className={`w-full text-left px-3 py-2.5 rounded-lg border transition flex items-center justify-between ${isSelected
                                 ? "bg-indigo-950/60 border-indigo-500/60 text-white"
                                 : "bg-slate-900/40 border-slate-800/80 text-slate-300 hover:bg-slate-800/50"
-                            }`}
+                              }`}
                           >
                             <div>
                               <div className="text-xs font-semibold flex items-center gap-1.5">
@@ -617,13 +610,12 @@ export default function StagingDashboard() {
                               </div>
                             </div>
                             <span
-                              className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
-                                st.status === "HEALTHY"
+                              className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${st.status === "HEALTHY"
                                   ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
                                   : st.status === "LATE"
-                                  ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
-                                  : "bg-rose-500/10 border-rose-500/30 text-rose-400"
-                              }`}
+                                    ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                                    : "bg-rose-500/10 border-rose-500/30 text-rose-400"
+                                }`}
                             >
                               {st.status}
                             </span>
@@ -805,7 +797,7 @@ export default function StagingDashboard() {
                             const getY = (v: number) =>
                               220 -
                               (Math.min(chartMaxY, Math.max(0, v)) / chartMaxY) *
-                                180;
+                              180;
                             const stepX = 800 / Math.max(1, forecasts.length - 1);
 
                             // 1. Full Conservative Envelope
@@ -932,8 +924,8 @@ export default function StagingDashboard() {
                               f.status === "publish"
                                 ? "#10b981"
                                 : f.status === "caution"
-                                ? "#f59e0b"
-                                : "#f43f5e";
+                                  ? "#f59e0b"
+                                  : "#f43f5e";
                             return <circle key={i} cx={cx} cy="232" r="3.5" fill={color} />;
                           })}
                         </svg>
@@ -981,13 +973,12 @@ export default function StagingDashboard() {
                                 </td>
                                 <td className="py-2 px-3">
                                   <span
-                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
-                                      f.status === "publish"
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${f.status === "publish"
                                         ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400"
                                         : f.status === "caution"
-                                        ? "bg-amber-500/10 border-amber-500/40 text-amber-400"
-                                        : "bg-rose-500/10 border-rose-500/40 text-rose-400"
-                                    }`}
+                                          ? "bg-amber-500/10 border-amber-500/40 text-amber-400"
+                                          : "bg-rose-500/10 border-rose-500/40 text-rose-400"
+                                      }`}
                                   >
                                     {f.status}
                                   </span>
@@ -1018,11 +1009,10 @@ export default function StagingDashboard() {
                           Reliability Simulator Lab & Benchmark Audits
                         </h2>
                         <span
-                          className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
-                            SCENARIO_LABELS[selectedScenario].isSimulated
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded border ${SCENARIO_LABELS[selectedScenario].isSimulated
                               ? "bg-amber-500/15 border-amber-500/40 text-amber-300"
                               : "bg-sky-500/15 border-sky-500/40 text-sky-300"
-                          }`}
+                            }`}
                         >
                           {SCENARIO_LABELS[selectedScenario].badge}
                         </span>
@@ -1039,11 +1029,10 @@ export default function StagingDashboard() {
                             key={sKey}
                             type="button"
                             onClick={() => setSelectedScenario(sKey)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-mono border transition ${
-                              selectedScenario === sKey
+                            className={`px-3 py-1.5 rounded-lg text-xs font-mono border transition ${selectedScenario === sKey
                                 ? "bg-indigo-600 text-white border-indigo-400"
                                 : "bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-800"
-                            }`}
+                              }`}
                           >
                             {sKey}
                           </button>
@@ -1089,13 +1078,12 @@ export default function StagingDashboard() {
                           liveScenarioBenchRows.map((row) => (
                             <tr
                               key={row.key}
-                              className={`hover:bg-slate-800/30 ${
-                                row.key.startsWith("sage_full")
+                              className={`hover:bg-slate-800/30 ${row.key.startsWith("sage_full")
                                   ? "bg-indigo-950/30 border-t border-indigo-500/40"
                                   : row.key === "lightgbm_quantile"
-                                  ? "bg-emerald-950/15"
-                                  : ""
-                              }`}
+                                    ? "bg-emerald-950/15"
+                                    : ""
+                                }`}
                             >
                               <td className="py-2.5 px-3 font-semibold text-white">
                                 {row.name}
@@ -1330,11 +1318,10 @@ export default function StagingDashboard() {
                   return (
                     <span
                       key={modeName}
-                      className={`px-1.5 py-0.5 rounded border ${
-                        isActive
+                      className={`px-1.5 py-0.5 rounded border ${isActive
                           ? "border-sky-400/60 bg-sky-500/20 text-sky-200 font-semibold"
                           : "border-slate-700 bg-slate-900 text-slate-400"
-                      }`}
+                        }`}
                     >
                       {modeName}
                     </span>
@@ -1365,7 +1352,7 @@ export default function StagingDashboard() {
                 <span className="font-mono">
                   {pilotReadiness?.shadow_evaluation_summary?.status ?? "INSUFFICIENT_OBSERVED_OUTCOMES"}
                 </span>{" "}
-                (requires &ge;{pilotReadiness?.shadow_evaluation_summary?.min_matched_outcomes_required ?? 100} matched targets across &ge;{pilotReadiness?.shadow_evaluation_summary?.min_unique_hours_required ?? 24} independent hours).
+                (requires &ge;{pilotReadiness?.shadow_evaluation_summary?.min_matched_outcomes_required ?? 100} matched targets, &ge;{pilotReadiness?.shadow_evaluation_summary?.min_unique_hours_required ?? 24} independent hours, &ge;{Math.round((pilotReadiness?.shadow_evaluation_summary?.min_lead_seconds_required ?? 300) / 60)}m lead, verified JSON SHA-256 artifacts).
               </div>
             </div>
           </div>
@@ -1380,12 +1367,11 @@ export default function StagingDashboard() {
         <div className="font-mono text-[11px] text-slate-400">
           Model:{" "}
           {modelStatus
-            ? `${modelStatus.model_class ?? "SAGEForecaster"} (${modelStatus.algorithm} v${modelStatus.version}) • SHA-256 ${
-                modelStatus.verified ? "Verified" : "UNVERIFIED"
-              } (${modelStatus.sha256.slice(0, 12)}…)`
+            ? `${modelStatus.model_class ?? "SAGEForecaster"} (${modelStatus.algorithm} v${modelStatus.version}) • SHA-256 ${modelStatus.verified ? "Verified" : "UNVERIFIED"
+            } (${modelStatus.sha256.slice(0, 12)}…)`
             : isDemoMode
-            ? "Offline Demo Fixtures (API Unreachable)"
-            : "Checking Model Governance…"}
+              ? "Offline Demo Fixtures (API Unreachable)"
+              : "Checking Model Governance…"}
         </div>
       </footer>
     </div>

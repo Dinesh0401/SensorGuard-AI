@@ -228,8 +228,11 @@ export interface PilotReadinessResponse {
     status: string;
     calibration_claim_eligible: boolean;
     adaptive_sage_promotion_eligible?: boolean;
+    artifact_integrity_verified?: boolean;
     min_matched_outcomes_required: number;
     min_unique_hours_required?: number;
+    min_lead_seconds_required?: number;
+    min_effective_lead_minutes?: number | null;
     models: Record<string, Record<string, unknown>>;
   };
   checked_at: string;
