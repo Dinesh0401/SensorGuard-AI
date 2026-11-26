@@ -287,6 +287,7 @@ class IngestionPipeline:
         datetime_to: str | None = None,
         max_pages: int = 5,
         page_size: int = 100,
+        auto_commit: bool = True,
     ) -> IngestResult:
         """Fetch and persist hourly observations for a sensor with versioned revisions.
 
@@ -413,5 +414,8 @@ class IngestionPipeline:
                         self.session.add(obs)
                         result.records_revised += 1
 
-        self.session.commit()
+        if auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return result

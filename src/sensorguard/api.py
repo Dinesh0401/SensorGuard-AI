@@ -33,13 +33,14 @@ import joblib
 import pandas as pd
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import desc, func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import desc, func, select, update
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from sensorguard.db.schema import (
     Observation,
+    PilotApiRateLimit,
     PilotControlState,
     PilotIngestAuditRun,
     Sensor,
@@ -87,7 +88,8 @@ from sensorguard.simulation import OutageConfig
 logger = logging.getLogger(__name__)
 
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
-_admin_request_history: list[float] = []
+_RATE_LIMIT_LOCK = threading.Lock()
+_FALLBACK_RATE_WINDOWS: dict[tuple[str, str], int] = {}
 
 
 @asynccontextmanager
@@ -170,8 +172,97 @@ def get_db():
         session.close()
 
 
-def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> None:
-    """Validate administrative authorization header with constant-time equality and rate limits.
+def _enforce_server_rate_limit(
+    scope: str,
+    max_requests_per_min: int,
+    db: Session | None = None,
+) -> None:
+    """Enforce server-side fixed-window API rate limits across workers via durable DB counters."""
+    if max_requests_per_min < 1:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded for {scope}",
+            headers={"Retry-After": "60"},
+        )
+    now = datetime.now(UTC)
+    window_key = now.strftime("%Y-%m-%dT%H:%M")
+
+    with _RATE_LIMIT_LOCK:
+        bind = db.get_bind() if db is not None else _ENGINE
+        try:
+            with Session(bind) as rl_sess:
+                row = rl_sess.scalars(
+                    select(PilotApiRateLimit).where(
+                        PilotApiRateLimit.scope == scope,
+                        PilotApiRateLimit.window_minute_utc == window_key,
+                    )
+                ).first()
+                if row is None:
+                    row = PilotApiRateLimit(
+                        scope=scope,
+                        window_minute_utc=window_key,
+                        request_count=0,
+                        max_requests=max_requests_per_min,
+                        updated_at=now,
+                    )
+                    try:
+                        with rl_sess.begin_nested():
+                            rl_sess.add(row)
+                            rl_sess.flush()
+                        rl_sess.commit()
+                    except IntegrityError:
+                        rl_sess.rollback()
+                        row = rl_sess.scalars(
+                            select(PilotApiRateLimit).where(
+                                PilotApiRateLimit.scope == scope,
+                                PilotApiRateLimit.window_minute_utc == window_key,
+                            )
+                        ).one()
+
+                upd = (
+                    update(PilotApiRateLimit)
+                    .where(
+                        PilotApiRateLimit.id == row.id,
+                        PilotApiRateLimit.request_count + 1 <= max_requests_per_min,
+                    )
+                    .values(
+                        request_count=PilotApiRateLimit.request_count + 1,
+                        max_requests=max_requests_per_min,
+                        updated_at=now,
+                    )
+                    .execution_options(synchronize_session=False)
+                )
+                res = rl_sess.execute(upd)
+                rl_sess.commit()
+                if int(res.rowcount or 0) != 1:
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail=f"Server-side rate limit exceeded for {scope} ({max_requests_per_min}/min)",
+                        headers={"Retry-After": "60"},
+                    )
+                return
+        except HTTPException:
+            raise
+        except SQLAlchemyError:
+            # Fallback for un-migrated SQLite fixtures missing pilot_api_rate_limits table
+            stale_keys = [k for k in _FALLBACK_RATE_WINDOWS if k[1] != window_key]
+            for sk in stale_keys:
+                _FALLBACK_RATE_WINDOWS.pop(sk, None)
+            cur = _FALLBACK_RATE_WINDOWS.get((scope, window_key), 0)
+            if cur >= max_requests_per_min:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Server-side rate limit exceeded for {scope} ({max_requests_per_min}/min)",
+                    headers={"Retry-After": "60"},
+                ) from None
+            _FALLBACK_RATE_WINDOWS[(scope, window_key)] = cur + 1
+
+
+def verify_admin_key(
+    x_admin_key: str = Header(..., alias="X-Admin-Key"),
+    db: Session = Depends(get_db),
+) -> None:
+    """Validate administrative authorization header with constant-time equality and durable rate limits.
 
     Fails closed with HTTP 503 if ADMIN_API_KEY is not configured in the environment.
     """
@@ -188,15 +279,8 @@ def verify_admin_key(x_admin_key: str = Header(..., alias="X-Admin-Key")) -> Non
             detail="Invalid administrative credentials",
         )
 
-    # Rate limiting: maximum 30 requests per minute
-    now = time.time()
-    _admin_request_history[:] = [t for t in _admin_request_history if now - t < 60.0]
-    if len(_admin_request_history) >= 30:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Administrative rate limit exceeded (max 30 requests per minute)",
-        )
-    _admin_request_history.append(now)
+    admin_cap = int(os.getenv("SENSORGUARD_ADMIN_RATE_LIMIT_PER_MIN", "30"))
+    _enforce_server_rate_limit("admin_api", admin_cap, db=db)
     logger.info("ADMIN_AUDIT: Administrative request authenticated at %s", datetime.now(UTC).isoformat())
 
 
@@ -487,6 +571,8 @@ def _shadow_summaries_from_registry(registry: dict[str, Any]) -> list[ShadowMode
             algorithm=str(m["algorithm"]),
             serving_role=str(m["serving_role"]),
             promoted_to_primary=bool(m.get("promoted_to_primary", False)),
+            model_created_at=m.get("model_created_at"),
+            artifact_immutable_ref=m.get("artifact_immutable_ref"),
             promotion_status_note=str(m.get("promotion_status_note", "")),
         )
         for m in registry.get("models", [])
@@ -530,6 +616,8 @@ def get_model_status() -> ModelStatusResponse:
         model_class=str(registry.get("primary_model_class", "SAGEForecaster")),
         serving_role="primary_serving",
         serving_policy=str(registry.get("serving_policy", "")),
+        model_created_at=manifest.created_at,
+        artifact_immutable_ref=f"{manifest.model_id}@{manifest.version}#{manifest.sha256[:12]}",
         shadow_models=_shadow_summaries_from_registry(registry),
         operational_data_mode="archived_historical",
         extra=manifest.extra,
@@ -539,6 +627,9 @@ def get_model_status() -> ModelStatusResponse:
 @app.get("/api/v1/pilot/readiness", response_model=PilotReadinessResponse, tags=["Pilot"])
 def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse:
     """Return Milestone 8 pilot readiness, fail-closed control state, quota, and shadow summary."""
+    pilot_cap = int(os.getenv("SENSORGUARD_PILOT_API_RATE_LIMIT_PER_MIN", "120"))
+    _enforce_server_rate_limit("pilot_readiness_api", pilot_cap, db=db)
+
     now = datetime.now(UTC)
     registry = load_model_registry()
     shadow_models = _shadow_summaries_from_registry(registry)
@@ -555,7 +646,7 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
     control_reason = (
         "Environment SENSORGUARD_POLLING_KILL_SWITCH active."
         if env_kill
-        else "Fail-closed default pending operator approval and schema migration 006."
+        else "Fail-closed default pending operator approval and schema migration."
     )
 
     try:
@@ -563,12 +654,26 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
             select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
         ).first()
         if ctrl is not None:
-            kill_switch_active = bool(env_kill or ctrl.kill_switch_active)
-            opt_in_enabled = bool((not env_kill) and (not ctrl.kill_switch_active) and ctrl.opt_in_enabled)
-            control_source = "env_kill_switch" if env_kill else "database_006"
-            control_reason = control_reason if env_kill else str(ctrl.reason or "Configured in database.")
+            op_authorized = bool(
+                (not ctrl.kill_switch_active)
+                and ctrl.opt_in_enabled
+                and ctrl.authorized_at is not None
+                and ctrl.updated_by not in {None, "", "system_default"}
+            )
+            kill_switch_active = bool(env_kill or (not op_authorized))
+            opt_in_enabled = bool((not env_kill) and op_authorized)
+            control_source = "env_kill_switch" if env_kill else "database_control"
+            control_reason = (
+                control_reason
+                if env_kill
+                else (
+                    str(ctrl.reason or "Authorized by operator.")
+                    if op_authorized
+                    else "Locked in database or missing explicit operator authorization."
+                )
+            )
         elif not env_kill:
-            control_source = "database_006_unset_fail_closed"
+            control_source = "database_unset_fail_closed"
             control_reason = "No PilotControlState unlock record; polling remains locked."
     except SQLAlchemyError:
         db.rollback()
@@ -592,9 +697,11 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
             {
                 "id": row.id,
                 "worker_id": row.worker_id,
+                "fencing_token": row.fencing_token,
                 "status": row.status,
                 "started_at": _ensure_utc(row.started_at).isoformat() if row.started_at else None,
                 "requests_consumed": row.requests_consumed,
+                "http_attempts": row.http_attempts,
                 "records_inserted": row.records_inserted,
                 "records_revised": row.records_revised,
                 "error_summary": row.error_summary,
@@ -605,13 +712,15 @@ def get_pilot_readiness(db: Session = Depends(get_db)) -> PilotReadinessResponse
         db.rollback()
 
     try:
-        shadow_summary = reconcile_shadow_evaluation(db, min_matched_outcomes=100)
+        shadow_summary = reconcile_shadow_evaluation(db, min_matched_outcomes=100, min_unique_hours=24)
     except SQLAlchemyError:
         db.rollback()
         shadow_summary = {
-            "status": "SCHEMA_006_NOT_APPLIED_OFFLINE",
+            "status": "SCHEMA_007_NOT_APPLIED_OFFLINE",
             "calibration_claim_eligible": False,
+            "adaptive_sage_promotion_eligible": False,
             "min_matched_outcomes_required": 100,
+            "min_unique_hours_required": 24,
             "models": {},
         }
 
@@ -951,6 +1060,7 @@ def _compute_station_forecasts_sync(
             for g in sorted_gammas
         ]
 
+        issued_wall_now = datetime.now(UTC)
         rec = ForecastRecord(
             station_id=station_id,
             decision_cutoff=t_cutoff,
@@ -965,6 +1075,7 @@ def _compute_station_forecasts_sync(
             is_stale=bool(age > 3.0),
             scenario_bounds=scen_bounds,
             feature_hash=None,
+            generated_at=issued_wall_now,
         )
         forecast_records.append(rec)
 
@@ -996,6 +1107,8 @@ async def get_station_forecasts(
     limit: int = Query(24, ge=1, le=168, description="Number of recent forecasts returned"),
 ) -> Response | StationForecastsResponse:
     """Issue point and conservative interval forecasts with guarded abstention decisions."""
+    forecast_cap = int(os.getenv("SENSORGUARD_FORECAST_API_RATE_LIMIT_PER_MIN", "600"))
+    _enforce_server_rate_limit("forecast_api", forecast_cap)
     model = get_serving_model()
 
     # Fast path: serve pre-serialized JSON response directly on event loop when warm
