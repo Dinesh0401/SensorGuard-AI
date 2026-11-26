@@ -833,9 +833,10 @@ def run_bounded_opt_in_poll(
                 attempt_guard=_reserve_single_http_attempt,
             )
             pipeline = IngestionPipeline(session)
+            buffered_batches: list[tuple[Sensor, list[Any]]] = []
 
             for sensor in sensors:
-                # Heartbeat renewal + ownership fencing before every sensor batch
+                # Heartbeat renewal + ownership fencing before every sensor HTTP fetch (no uncommitted write lock!)
                 with session_factory() as l_sess:
                     renewed = renew_poll_lease(
                         l_sess,
@@ -851,25 +852,19 @@ def run_bounded_opt_in_poll(
                         f"Lost lease ownership before polling sensor {sensor.provider_sensor_id} "
                         f"(stale fencing_token={my_fencing_token})."
                     )
-                    session.rollback()
                     break
 
                 try:
-                    res = pipeline.ingest_sensor_hours(
-                        sensor_db_id=sensor.id,
-                        provider_sensor_id=sensor.provider_sensor_id,
-                        client=client,
-                        datetime_from=window_from,
-                        datetime_to=window_to,
-                        max_pages=config.max_pages_per_sensor,
-                        page_size=config.page_size,
-                        auto_commit=False,
+                    pages = list(
+                        client.paginate_sensor_hours(
+                            sensor_id=sensor.provider_sensor_id,
+                            datetime_from=window_from,
+                            datetime_to=window_to,
+                            page_size=config.page_size,
+                            max_pages=config.max_pages_per_sensor,
+                        )
                     )
-                    fetched_total += res.records_fetched
-                    persisted_total += res.records_inserted
-                    revised_total += res.records_revised
-                    dedup_total += res.records_deduplicated
-                    invalid_total += res.records_invalid
+                    buffered_batches.append((sensor, pages))
                     sensors_polled += 1
                 except QuotaExhaustedError as q_exc:
                     quota_halted = True
@@ -885,31 +880,44 @@ def run_bounded_opt_in_poll(
                     error_msg = str(http_exc)
                     raise
 
-            # Final commit-time fencing gate: refuse stale commit if another worker took over lease!
+            # Atomic commit-time ownership fencing BEFORE flushing buffered observations into DB
             if not stale_fencing_abort:
-                with session_factory() as fence_sess:
-                    fence_valid = verify_fencing_token(
-                        fence_sess,
-                        holder_id=worker_id,
-                        fencing_token=my_fencing_token,
-                        lease_name=config.lease_name,
-                        now_utc=_current_clock(),
+                fence_now = _current_clock()
+                fence_stmt = (
+                    update(PilotPollLease)
+                    .where(
+                        PilotPollLease.lease_name == config.lease_name,
+                        PilotPollLease.holder_id == worker_id,
+                        PilotPollLease.fencing_token == my_fencing_token,
+                        PilotPollLease.expires_at > fence_now,
                     )
-                if not fence_valid:
+                    .values(heartbeat_at=fence_now, updated_at=fence_now)
+                    .execution_options(synchronize_session=False)
+                )
+                fence_res = session.execute(fence_stmt)
+                if int(fence_res.rowcount or 0) != 1:
                     stale_fencing_abort = True
                     error_msg = (
                         f"Commit aborted by ownership fence: lease expired or preempted "
                         f"(stale fencing_token={my_fencing_token})."
                     )
                     session.rollback()
-                    fetched_total = 0
-                    persisted_total = 0
-                    revised_total = 0
-                    dedup_total = 0
-                    invalid_total = 0
-
-            if not stale_fencing_abort:
-                session.commit()
+                else:
+                    for b_sensor, b_pages in buffered_batches:
+                        res = pipeline.persist_fetched_responses(
+                            sensor_db_id=b_sensor.id,
+                            provider_sensor_id=b_sensor.provider_sensor_id,
+                            responses=b_pages,
+                            datetime_from=window_from,
+                            datetime_to=window_to,
+                            auto_commit=False,
+                        )
+                        fetched_total += res.records_fetched
+                        persisted_total += res.records_inserted
+                        revised_total += res.records_revised
+                        dedup_total += res.records_deduplicated
+                        invalid_total += res.records_invalid
+                    session.commit()
 
             final_status = (
                 "SKIPPED_STALE_FENCING_TOKEN"
