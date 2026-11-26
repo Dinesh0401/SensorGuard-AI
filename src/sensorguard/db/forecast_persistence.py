@@ -55,6 +55,8 @@ def materialize_station_forecasts(
 
     max_ts = _to_utc(featured_df["timestamp"].max()) or datetime.now(UTC)
     now_ts = datetime.now(UTC)
+    created_dt = _to_utc(manifest.created_at) or now_ts
+    imm_ref = f"{manifest.model_id}@{manifest.version}#{manifest.sha256[:12]}"
     run_idem_key = hashlib.sha256(
         f"serving:{manifest.model_id}:{manifest.version}:{manifest.sha256}:{max_ts.isoformat()}:{now_ts.isoformat()}".encode()
     ).hexdigest()
@@ -67,9 +69,13 @@ def materialize_station_forecasts(
         execution_mode="serving",
         evaluation_mode="serving",
         model_created_at=manifest.created_at,
-        artifact_immutable_ref=f"{manifest.model_id}@{manifest.version}#{manifest.sha256[:12]}",
+        artifact_immutable_ref=imm_ref,
+        training_completed_at=created_dt,
+        code_version="sensorguard-ai/0.1.0-m87",
+        feature_schema_version="spatiotemporal_pm25_v1",
         idempotency_key=run_idem_key,
         nominal_coverage=float(manifest.nominal_coverage),
+        effective_lead_seconds=round((max_ts + timedelta(hours=1) - now_ts).total_seconds(), 3),
         issued_at=now_ts,
         generated_at=now_ts,
         persisted_at=now_ts,
@@ -159,6 +165,11 @@ def materialize_station_forecasts(
                 newest_source_observed_at=newest_obs_at,
                 feature_hash=feature_hash,
                 scenario_bounds_json=json.dumps(scenario_bounds, sort_keys=True),
+                artifact_immutable_ref=imm_ref,
+                artifact_sha256=manifest.sha256,
+                training_completed_at=created_dt,
+                effective_lead_seconds=round((target_dt - rec_ts).total_seconds(), 3),
+                available_at_decision_cutoff=bool(rec_ts <= cutoff_dt),
                 generated_at=now_ts,
                 persisted_at=rec_ts,
                 created_at=rec_ts,
