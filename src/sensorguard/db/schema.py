@@ -222,8 +222,15 @@ class ForecastRun(Base):
     data_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="archived_historical")
     model_created_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     artifact_immutable_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    training_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    training_data_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    calibration_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    code_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    feature_schema_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, unique=True, index=True)
     nominal_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.90)
+    min_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    effective_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -281,6 +288,12 @@ class ForecastRecord(Base):
     newest_source_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     feature_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     scenario_bounds_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_immutable_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    artifact_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    training_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    effective_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    min_lead_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    available_at_decision_cutoff: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),

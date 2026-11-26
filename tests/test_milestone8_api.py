@@ -5,12 +5,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from sensorguard.api import (
+    _FALLBACK_RATE_WINDOWS,
     _compute_station_forecasts_sync,
+    _enforce_server_rate_limit,
+    _is_isolated_dev_rate_limit_fallback_allowed,
     app,
     get_db,
     get_serving_model,
@@ -19,6 +23,7 @@ from sensorguard.api import (
 from sensorguard.db.schema import (
     Base,
     Observation,
+    PilotApiRateLimit,
     PilotControlState,
     RawIngestBatch,
     Sensor,
@@ -220,3 +225,82 @@ def test_pilot_readiness_endpoint_fail_closed_default_and_migrated_db(tmp_path: 
         app.dependency_overrides.clear()
         invalidate_pilot_feature_cache()
         eng.dispose()
+
+
+def test_cross_worker_rate_limit_and_fail_closed_db_failure(tmp_path: Path, monkeypatch) -> None:
+    """Verify multi-worker DB rate limits, HTTP 503 fail-closed behavior on DB loss, and dev fallback guard (Part B)."""
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    db_file = tmp_path / "shared_rl.db"
+    eng1 = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
+    eng2 = create_engine(f"sqlite:///{db_file}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(eng1)
+    sf1 = sessionmaker(bind=eng1, autoflush=False, autocommit=False)
+    sf2 = sessionmaker(bind=eng2, autoflush=False, autocommit=False)
+
+    monkeypatch.setenv("SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV", "false")
+    monkeypatch.setenv("SENSORGUARD_ENV", "production")
+
+    try:
+        # 1. Cross-worker parity across completely separate Engine handles (zero shared memory)
+        with sf1() as w1, sf2() as w2:
+            _enforce_server_rate_limit("cross_worker_scope", 3, db=w1)
+            _enforce_server_rate_limit("cross_worker_scope", 3, db=w2)
+            _enforce_server_rate_limit("cross_worker_scope", 3, db=w1)
+            with pytest.raises(HTTPException) as exc_429:
+                _enforce_server_rate_limit("cross_worker_scope", 3, db=w2)
+            assert exc_429.value.status_code == 429
+            assert exc_429.value.headers == {"Retry-After": "60"}
+
+        # 2. Simulate PostgreSQL/production DB failure -> MUST fail closed with 503 across all protected endpoints
+        import sensorguard.api as api_mod
+
+        PilotApiRateLimit.__table__.drop(bind=eng1)
+
+        def _broken_db():
+            with sf1() as s:
+                yield s
+
+        monkeypatch.setenv("ADMIN_API_KEY", "test-m87-admin-secret")
+        monkeypatch.setattr(api_mod, "_ENGINE", eng1)
+        app.dependency_overrides[get_db] = _broken_db
+        with TestClient(app) as client:
+            r_pilot = client.get("/api/v1/pilot/readiness")
+            assert r_pilot.status_code == 503
+            assert "failing closed" in r_pilot.json()["detail"].lower()
+
+            r_fc = client.get("/api/v1/stations/1/forecasts?limit=4")
+            assert r_fc.status_code == 503
+            assert "failing closed" in r_fc.json()["detail"].lower()
+
+            r_admin = client.post(
+                "/api/v1/admin/ingest",
+                json={"days": 1},
+                headers={"X-Admin-Key": "test-m87-admin-secret"},
+            )
+            assert r_admin.status_code == 503
+            assert "failing closed" in r_admin.json()["detail"].lower()
+
+        # 3. Even if SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV=true & SENSORGUARD_ENV=test,
+        # PostgreSQL dialect MUST NEVER fall back to process-local memory!
+        monkeypatch.setenv("SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV", "true")
+        monkeypatch.setenv("SENSORGUARD_ENV", "test")
+        fake_pg_bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+        assert _is_isolated_dev_rate_limit_fallback_allowed(fake_pg_bind) is False
+
+        # 4. Isolated SQLite dev/test explicit opt-in allows in-memory fallback cleanly while still enforcing cap
+        _FALLBACK_RATE_WINDOWS.clear()
+        with sf1() as s_dev:
+            assert _is_isolated_dev_rate_limit_fallback_allowed(s_dev.get_bind()) is True
+            _enforce_server_rate_limit("dev_isolated_scope", 2, db=s_dev)
+            _enforce_server_rate_limit("dev_isolated_scope", 2, db=s_dev)
+            with pytest.raises(HTTPException) as exc_dev_429:
+                _enforce_server_rate_limit("dev_isolated_scope", 2, db=s_dev)
+            assert exc_dev_429.value.status_code == 429
+    finally:
+        _FALLBACK_RATE_WINDOWS.clear()
+        app.dependency_overrides.clear()
+        eng1.dispose()
+        eng2.dispose()
