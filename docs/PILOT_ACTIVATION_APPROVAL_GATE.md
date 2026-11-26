@@ -28,7 +28,7 @@ Do not enable polling until every step is checked and signed off:
 
 1. **Server-Side Secrets & Environment Lock:**
    - Provision `OPENAQ_API_KEY`, `ADMIN_API_KEY`, and PostgreSQL `DATABASE_URL` exclusively in `.env` (git-ignored). Never expose keys in `apps/web` or `NEXT_PUBLIC_*`.
-   - Confirm `SENSORGUARD_POLLING_KILL_SWITCH` is `"true"` during setup and `alembic upgrade head` reports `007_m86_prospective_timestamps_and_fencing (head)`.
+   - Confirm `SENSORGUARD_POLLING_KILL_SWITCH` is `"true"` during setup and `alembic upgrade head` reports `007_m86_safety_fencing (head)`.
 2. **Pre-Flight Availability Check (Max 8–16 HTTP Requests Total):**
    - Explicitly approve running a one-time `/v3/locations/{id}` probe across the 8 location IDs to confirm which sensors currently return 2026 hourly measurements.
    - Restrict `BoundedPilotConfig.allowed_location_ids` strictly to live active IDs (e.g., `(154, 157)` plus any verified replacement active UK DEFRA sensors).

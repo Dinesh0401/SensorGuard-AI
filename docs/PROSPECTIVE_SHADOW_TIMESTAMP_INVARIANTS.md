@@ -1,6 +1,6 @@
 # SensorGuard AI — Prospective Shadow Timestamp Invariants & Evaluation Protocol (Phase 8.6)
 
-**Implementation:** [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/007_m86_prospective_timestamps_and_fencing.py`](../alembic/versions/007_m86_prospective_timestamps_and_fencing.py)  
+**Implementation:** [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/007_m86_safety_fencing.py`](../alembic/versions/007_m86_safety_fencing.py)  
 **Test Suite:** [`tests/test_shadow_eval.py`](../tests/test_shadow_eval.py)
 
 ---

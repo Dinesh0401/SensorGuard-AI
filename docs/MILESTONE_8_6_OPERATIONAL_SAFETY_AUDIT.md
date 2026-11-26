@@ -3,7 +3,7 @@
 **Audit Date:** 2026-11-26  
 **Branch:** `feat/milestone-3-forecasting-uncertainty`  
 **Starting Commit:** [`454c12573c79bc9f80eff1e4f832db9667e9c618`](https://github.com/Dinesh0401/SensorGuard-AI/commit/454c12573c79bc9f80eff1e4f832db9667e9c618)  
-**Schema Migration:** [`alembic/versions/007_m86_prospective_timestamps_and_fencing.py`](../alembic/versions/007_m86_prospective_timestamps_and_fencing.py)
+**Schema Migration:** [`alembic/versions/007_m86_safety_fencing.py`](../alembic/versions/007_m86_safety_fencing.py)
 
 ---
 
@@ -21,7 +21,7 @@ Milestone 8.6 resolves every operational-safety and scientific-validity blocker 
 
 ---
 
-## 2. Database Schema Evolution (`007_m86_prospective_timestamps_and_fencing`)
+## 2. Database Schema Evolution (`007_m86_safety_fencing`)
 
 - **`forecast_runs`:** `evaluation_mode` (`"serving" | "prospective_shadow" | "retrospective_replay"`), `model_created_at`, `artifact_immutable_ref`, unique `idempotency_key`, indexed `generated_at` and `persisted_at`.
 - **`forecasts`:** `generated_at`, `persisted_at`, and unique index `uq_forecasts_run_station_target` on `(run_id, station_id, target_time)`.

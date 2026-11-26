@@ -1,6 +1,6 @@
 """Add Milestone 8.6 prospective timestamp lineage, idempotency constraints, lease fencing, and server rate limits.
 
-Revision ID: 007_m86_prospective_timestamps_and_fencing
+Revision ID: 007_m86_safety_fencing
 Revises: 006_durable_pilot_control
 Create Date: 2026-11-26 20:30:00.000000+00:00
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "007_m86_prospective_timestamps_and_fencing"
+revision: str = "007_m86_safety_fencing"
 down_revision: str | None = "006_durable_pilot_control"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
