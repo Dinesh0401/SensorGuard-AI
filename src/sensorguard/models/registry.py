@@ -43,7 +43,7 @@ class ModelRegistryEntry:
     artifact_path: str | None
     sha256: str | None
     model_created_at: str | None
-    artifact_immutable_ref: str
+    artifact_immutable_ref: str | None
     promotion_status_note: str
 
 
@@ -92,11 +92,12 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             artifact_path=None,
             sha256=None,
             model_created_at="2026-11-25T16:35:05+00:00",
-            artifact_immutable_ref=f"sage_adaptive_q1_2024@2.0.0-shadow-m77#data_{dataset_hash[:12]}",
+            artifact_immutable_ref=None,
             promotion_status_note=(
-                "Shadow research candidate ONLY (NOT served by primary API). M7.7 causal audit "
-                "(SG-M77-ADAPTIVE-20261125-163505) showed natural Spearman rho=+0.1749 (<0.20 "
-                "target) and +0.47 Winkler penalty vs locally_weighted_mar."
+                "Shadow research benchmark summary ONLY (NOT served by primary API; no serialized artifact; "
+                "prospective shadow runs serialize immutable per-suite JSON artifacts with byte SHA-256). "
+                "M7.7 causal audit (SG-M77-ADAPTIVE-20261125-163505) showed natural Spearman rho=+0.1749 "
+                "(<0.20 target) and +0.47 Winkler penalty vs locally_weighted_mar."
             ),
         ),
         ModelRegistryEntry(
@@ -111,10 +112,10 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             artifact_path=None,
             sha256=None,
             model_created_at="2026-11-25T16:35:05+00:00",
-            artifact_immutable_ref=f"locally_weighted_mar_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
+            artifact_immutable_ref=None,
             promotion_status_note=(
-                "Shadow baseline isolating causal forward-OOF local error scale s(x) under "
-                "MAR (gamma=0.0); achieved best LightGBM-family Winkler in natural (8.72) and LOSO (4.63)."
+                "Shadow research benchmark summary ONLY (unserialized Q1 2024 baseline; prospective runs "
+                "serialize immutable per-model JSON artifacts). Achieved best LightGBM-family Winkler in natural (8.72)."
             ),
         ),
         ModelRegistryEntry(
@@ -129,8 +130,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             artifact_path=None,
             sha256=None,
             model_created_at="2026-11-25T16:35:05+00:00",
-            artifact_immutable_ref=f"lightgbm_cqr_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
-            promotion_status_note="Shadow quantile baseline (Romano et al. 2019).",
+            artifact_immutable_ref=None,
+            promotion_status_note="Shadow research benchmark summary ONLY (Romano et al. 2019; prospective runs require serialized JSON artifacts).",
         ),
         ModelRegistryEntry(
             model_id="persistence_split_q1_2024",
@@ -144,8 +145,8 @@ def build_default_registry(manifest: ModelManifest | None = None) -> dict[str, A
             artifact_path=None,
             sha256=None,
             model_created_at="2026-11-25T16:35:05+00:00",
-            artifact_immutable_ref=f"persistence_split_q1_2024@1.0.0-shadow#data_{dataset_hash[:12]}",
-            promotion_status_note="Shadow persistence reference baseline (natural Winkler 3.16).",
+            artifact_immutable_ref=None,
+            promotion_status_note="Shadow persistence benchmark summary ONLY (natural Winkler 3.16; prospective runs require serialized JSON artifacts).",
         ),
     ]
 
