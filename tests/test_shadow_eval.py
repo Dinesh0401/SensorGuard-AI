@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -204,9 +205,7 @@ def test_genuine_prospective_shadow_forecasts_before_future_target_arrival(tmp_p
         assert len(runs) == 5
         assert all(r.evaluation_mode == "prospective_shadow" for r in runs)
         assert all(r.generated_at <= r.persisted_at < future_target for r in runs)
-        assert all(
-            r.training_completed_at is not None and r.code_version == SHADOW_CODE_VERSION for r in runs
-        )
+        assert all(r.training_completed_at is not None and r.code_version == SHADOW_CODE_VERSION for r in runs)
 
         recs = list(session.scalars(select(ForecastRecord)).all())
         assert len(recs) == 10  # 2 stations x 5 models
@@ -366,10 +365,7 @@ def test_shadow_artifact_integrity_roundtrip_and_tamper_rejection(tmp_path) -> N
             )
 
         # 3. Reject tampered artifact bytes
-        tamper_suite = {
-            **suite,
-            "model_provenance": {k: dict(v) for k, v in suite["model_provenance"].items()},
-        }
+        tamper_suite = {**suite, "model_provenance": {k: dict(v) for k, v in suite["model_provenance"].items()}}
         target_file = Path(tamper_suite["model_provenance"]["sage_adaptive"]["artifact_path"])
         orig_bytes = target_file.read_bytes()
         target_file.write_bytes(orig_bytes.replace(b'"nominal_coverage":0.9', b'"nominal_coverage":0.8'))
@@ -522,10 +518,7 @@ def test_prospective_lead_time_boundaries_delayed_commit_and_concurrency(tmp_pat
         )
         assert len(c2_recs) == 10
         assert all(r.available_at_decision_cutoff is True for r in c2_recs)
-        assert all(
-            r.effective_lead_seconds == pytest.approx((target2 - on_time_ts).total_seconds(), abs=0.5)
-            for r in c2_recs
-        )
+        assert all(r.effective_lead_seconds == pytest.approx((target2 - on_time_ts).total_seconds(), abs=0.5) for r in c2_recs)
 
         # 5. Pre-existing target observation added mid-flight aborts commit cleanly
         cutoff3 = end_hr + timedelta(hours=2)

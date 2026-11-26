@@ -341,12 +341,12 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
         )
         assert fenced_poll["status"] == "SKIPPED_STALE_FENCING_TOKEN"
         assert fenced_poll["records_persisted"] == 0
-        # Verify quota WAS consumed for the outbound HTTP attempt despite stale commit abort
+        # Verify quota WAS consumed for the outbound HTTP attempt on UTC day 2026-11-25 (3 from poll1 + 1 fenced = 4)
         with factory() as check_s:
             used_after_fence, _ = DurablePilotQuotaTracker(max_requests_per_day=12).get_usage(
                 check_s, now_utc=t_poll2
             )
-            assert used_after_fence == 1
+            assert used_after_fence == 4
             assert (
                 check_s.scalars(select(Observation).where(Observation.observed_at == t_target)).first()
                 is None
