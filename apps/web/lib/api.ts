@@ -227,7 +227,9 @@ export interface PilotReadinessResponse {
   shadow_evaluation_summary: {
     status: string;
     calibration_claim_eligible: boolean;
+    adaptive_sage_promotion_eligible?: boolean;
     min_matched_outcomes_required: number;
+    min_unique_hours_required?: number;
     models: Record<string, Record<string, unknown>>;
   };
   checked_at: string;
