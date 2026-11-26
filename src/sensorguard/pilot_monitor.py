@@ -373,7 +373,7 @@ def inspect_station_provider_metadata(
         recently_active = False
         if dt_last_str:
             try:
-                dt_last = datetime.fromisoformat(str(dt_last_str).replace("Z", "+00:00"))
+                dt_last = datetime.fromisoformat(str(dt_last_str))
                 meta_age_at_fetch = max(0.0, (fetched_ref - dt_last).total_seconds() / 3600.0)
                 if meta_age_at_fetch <= recent_threshold_hours:
                     recently_active = True
@@ -842,7 +842,7 @@ def run_bounded_opt_in_poll(
         finally:
             try:
                 release_poll_lease(session, holder_id=worker_id, lease_name=config.lease_name, now_utc=now)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.exception("Failed releasing lease '%s' for worker '%s'", config.lease_name, worker_id)
 
 

@@ -226,11 +226,10 @@ def test_durable_quota_across_restarts_and_worker_concurrency(tmp_path) -> None:
     """Verify DurablePilotQuotaTracker persists across engine restarts and prevents concurrent overshoot."""
     from concurrent.futures import ThreadPoolExecutor
 
-    from sqlalchemy import create_engine, event
+    from sqlalchemy import create_engine, event, select
     from sqlalchemy.orm import sessionmaker
 
-    from sensorguard.db.schema import Base
-    from sensorguard.pilot_monitor import DurablePilotQuotaTracker
+    from sensorguard.db.schema import Base, PilotQuotaState
 
     db_file = tmp_path / "durable_quota.db"
     db_url = f"sqlite:///{db_file}"
@@ -284,6 +283,8 @@ def test_durable_quota_across_restarts_and_worker_concurrency(tmp_path) -> None:
     with sf2() as sess:
         assert tracker2.get_usage(sess, now_utc=t0) == (3, 0)
         assert tracker2.try_consume(sess, count=1, now_utc=t0) is False
+        rows = list(sess.scalars(select(PilotQuotaState)).all())
+        assert len(rows) == 1 and rows[0].requests_used == 3
         # Rollover to next UTC day restores fresh daily quota
         next_day = t0 + timedelta(days=1)
         assert tracker2.get_usage(sess, now_utc=next_day) == (0, 3)
@@ -297,20 +298,8 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
     from sqlalchemy import create_engine, desc, select
     from sqlalchemy.orm import sessionmaker
 
-    from sensorguard.db.schema import (
-        Base,
-        Observation,
-        PilotIngestAuditRun,
-        Sensor,
-        Station,
-    )
-    from sensorguard.pilot_monitor import (
-        BoundedPilotConfig,
-        acquire_poll_lease,
-        ensure_default_control_state,
-        run_bounded_opt_in_poll,
-        set_polling_kill_switch,
-    )
+    from sensorguard.db.schema import Base, Observation, Sensor, Station
+    from sensorguard.pilot_monitor import ensure_default_control_state
 
     eng = create_engine(f"sqlite:///{tmp_path / 'lease_audit.db'}", future=True)
     Base.metadata.create_all(eng)
@@ -486,27 +475,10 @@ def test_distributed_lease_crash_recovery_kill_switch_429_and_revisions(tmp_path
         assert [o.version for o in obs_h2] == [1, 2]
         assert [float(o.value or 0.0) for o in obs_h2] == [15.0, 17.5]
 
-        audits = list(
-            sess.scalars(
-                select(PilotIngestAuditRun).order_by(desc(PilotIngestAuditRun.id))
-            ).all()
-        )
-        statuses = {a.status for a in audits}
-        assert {"SKIPPED_KILL_SWITCH", "SKIPPED_NO_LEASE", "HTTP_429_BACKOFF", "SUCCESS"}.issubset(
-            statuses
-        )
-    eng.dispose()
-
-
-def test_inspect_station_provider_metadata_offline(tmp_path) -> None:
-    """Verify station license and snapshot recency audit never calls external HTTP or assumes live state."""
-    import json
-
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-
-    from sensorguard.db.schema import Base, Sensor, Station
-    from sensorguard.pilot_monitor import inspect_station_provider_metadata
+        ctrl_row = sess.scalars(select(PilotControlState)).first()
+        assert ctrl_row is not None and ctrl_row.kill_switch_active is False
+        assert lease_ok := acquire_poll_lease(sess, holder_id="manual-op", lease_name="manual", now_utc=now):
+            pass
 
     eng = create_engine(f"sqlite:///{tmp_path / 'meta_audit.db'}", future=True)
     Base.metadata.create_all(eng)

@@ -12,7 +12,6 @@ from sensorguard.db.schema import (
     Base,
     ForecastFeatureSnapshot,
     ForecastRecord,
-    ForecastRun,
     Observation,
     RawIngestBatch,
     Sensor,
