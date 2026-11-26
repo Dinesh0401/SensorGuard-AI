@@ -1,8 +1,10 @@
 {
-  "schema_version": "1.0",
-  "serving_policy": "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). AdaptiveSAGEForecaster and baselines run strictly in offline/shadow evaluation until live matched-outcome criteria are satisfied and operator promotion is approved.",
+  "schema_version": "1.1",
+  "serving_policy": "Primary API exclusively serves Static SAGEForecaster (sage_pilot_q1_2024 v1.0.0). AdaptiveSAGEForecaster and baselines run strictly in offline/shadow evaluation until prospective matched-outcome criteria are satisfied and operator promotion is approved.",
   "primary_model_id": "sage_pilot_q1_2024",
   "primary_model_class": "SAGEForecaster",
+  "primary_model_created_at": "2026-11-25T04:08:50.393371+00:00",
+  "primary_artifact_immutable_ref": "sage_pilot_q1_2024@1.0.0#e552ca09a378",
   "adaptive_sage_promoted": false,
   "allowed_data_modes": [
     "archived_historical",
@@ -22,6 +24,8 @@
       "nominal_coverage": 0.9,
       "artifact_path": "artifacts/models/sage_pilot_q1_2024.joblib",
       "sha256": "e552ca09a37856f809f2dc6db9f8eabf291a6fd4103da92874ac440bd91e4115",
+      "model_created_at": "2026-11-25T04:08:50.393371+00:00",
+      "artifact_immutable_ref": "sage_pilot_q1_2024@1.0.0#e552ca09a378",
       "promotion_status_note": "Active FastAPI serving artifact (Static SAGEForecaster). Uses globally calibrated sensitivity bounds; D_sensitivity is constant (~3.32 ug/m^3) across inputs and abstentions are driven by age_hours > 12h freshness rule."
     },
     {
@@ -35,6 +39,8 @@
       "nominal_coverage": 0.9,
       "artifact_path": null,
       "sha256": null,
+      "model_created_at": "2026-11-25T16:35:05+00:00",
+      "artifact_immutable_ref": "sage_adaptive_q1_2024@2.0.0-shadow-m77#data_33805c42097f",
       "promotion_status_note": "Shadow research candidate ONLY (NOT served by primary API). M7.7 causal audit (SG-M77-ADAPTIVE-20261125-163505) showed natural Spearman rho=+0.1749 (<0.20 target) and +0.47 Winkler penalty vs locally_weighted_mar."
     },
     {
@@ -48,6 +54,8 @@
       "nominal_coverage": 0.9,
       "artifact_path": null,
       "sha256": null,
+      "model_created_at": "2026-11-25T16:35:05+00:00",
+      "artifact_immutable_ref": "locally_weighted_mar_q1_2024@1.0.0-shadow#data_33805c42097f",
       "promotion_status_note": "Shadow baseline isolating causal forward-OOF local error scale s(x) under MAR (gamma=0.0); achieved best LightGBM-family Winkler in natural (8.72) and LOSO (4.63)."
     },
     {
@@ -61,6 +69,8 @@
       "nominal_coverage": 0.9,
       "artifact_path": null,
       "sha256": null,
+      "model_created_at": "2026-11-25T16:35:05+00:00",
+      "artifact_immutable_ref": "lightgbm_cqr_q1_2024@1.0.0-shadow#data_33805c42097f",
       "promotion_status_note": "Shadow quantile baseline (Romano et al. 2019)."
     },
     {
@@ -74,6 +84,8 @@
       "nominal_coverage": 0.9,
       "artifact_path": null,
       "sha256": null,
+      "model_created_at": "2026-11-25T16:35:05+00:00",
+      "artifact_immutable_ref": "persistence_split_q1_2024@1.0.0-shadow#data_33805c42097f",
       "promotion_status_note": "Shadow persistence reference baseline (natural Winkler 3.16)."
     }
   ]

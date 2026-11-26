@@ -1365,7 +1365,7 @@ export default function StagingDashboard() {
                 <span className="font-mono">
                   {pilotReadiness?.shadow_evaluation_summary?.status ?? "INSUFFICIENT_OBSERVED_OUTCOMES"}
                 </span>{" "}
-                (requires &ge;{pilotReadiness?.shadow_evaluation_summary?.min_matched_outcomes_required ?? 100} matched targets).
+                (requires &ge;{pilotReadiness?.shadow_evaluation_summary?.min_matched_outcomes_required ?? 100} matched targets across &ge;{pilotReadiness?.shadow_evaluation_summary?.min_unique_hours_required ?? 24} independent hours).
               </div>
             </div>
           </div>
