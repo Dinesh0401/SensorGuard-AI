@@ -184,7 +184,9 @@ def test_stage1_preflight_bounded_mock_checks_retries_quota_and_secret_redaction
                             {
                                 "id": loc_id,
                                 "name": f"Verified UK #{loc_id}",
-                                "provider": {"name": "London Air Quality Network" if loc_id in (154, 157) else "EEA"},
+                                "provider": {
+                                    "name": "London Air Quality Network" if loc_id in (154, 157) else "EEA"
+                                },
                                 "licenses": [{"name": "UK OGL" if loc_id in (154, 157) else "ODC-BY"}],
                                 "datetimeLast": {"utc": dt_last},
                                 "sensors": [{"id": sens_id, "parameter": {"name": "pm25"}}],

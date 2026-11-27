@@ -296,9 +296,7 @@ def _generate_shadow_batch(
         raise ValueError(
             f"commit_safety_margin_seconds cannot be negative (got {commit_safety_margin_seconds})."
         )
-    effective_margin = (
-        float(commit_safety_margin_seconds) if evaluation_mode == "prospective_shadow" else 0.0
-    )
+    effective_margin = float(commit_safety_margin_seconds) if evaluation_mode == "prospective_shadow" else 0.0
 
     clock_fn = now_fn or (lambda: datetime.now(UTC))
     norm_cutoffs = sorted({_to_utc(tc) for tc in decision_cutoffs if _to_utc(tc) is not None})
@@ -650,8 +648,7 @@ def _generate_shadow_batch(
 
     # Operational post-commit proof: capture conservative DB completion timestamp AFTER commit() returns
     actual_commit_completed_at = _to_utc(clock_fn()) or datetime.now(UTC)
-    if actual_commit_completed_at < actual_pre_commit_at:
-        actual_commit_completed_at = actual_pre_commit_at
+    actual_commit_completed_at = max(actual_commit_completed_at, actual_pre_commit_at)
 
     min_completed_lead = round(
         min((tt - actual_commit_completed_at).total_seconds() for tt in target_times), 3
