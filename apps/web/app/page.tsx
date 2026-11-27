@@ -374,37 +374,32 @@ export default function StagingDashboard() {
   }, [forecasts, observedByHour]);
 
   const liveScenarioBenchRows = useMemo(() => {
-    const scData = benchmarkDetail?.details?.scenarios?.[selectedScenario];
-    if (!scData || !scData.models) return null;
+    const scenData =
+      benchmarkDetail?.details?.scenarios?.[selectedScenario] || null;
+    if (!scenData) return null;
 
-    const methodLabels: Record<string, string> = {
-      persistence: "Persistence (B0a)",
-      seasonal_naive: "Seasonal Naive 24h (B0b)",
-      spatial_neighbor: "Spatial Neighbor IDW (B1)",
-      ridge_spatiotemporal: "Ridge Regression (B2a)",
-      lightgbm_point: "LightGBM Split Conformal (B2b)",
-      lightgbm_quantile: "LightGBM + CQR (B2c)",
-      lightgbm_rolling: "LightGBM Rolling (B3)",
-      lightgbm_aci: "LightGBM + ACI (B4)",
-      sage_no_abstain: "SAGE (No Abstention)",
-      sage_full: "SAGE Full (Guarded)",
-    };
-
-    return Object.entries(scData.models)
-      .filter(([, m]) => typeof m === "object" && m !== null)
-      .map(([key, m]) => {
-        const displayName =
-          methodLabels[key] || (typeof m.model === "string" ? m.model : key);
-        const calibrator =
-          typeof m.calibrator === "string"
-            ? m.calibrator
-            : typeof m.policy === "string"
-            ? m.policy
-            : "Empirical Quantile";
+    const orderedKeys = [
+      "persistence",
+      "seasonal_naive",
+      "spatial_neighbor",
+      "ridge",
+      "lightgbm_point",
+      "lightgbm_quantile",
+      "lightgbm_rolling",
+      "lightgbm_aci",
+      "sage_gamma_0",
+      "sage_no_abstain",
+      "sage_full",
+    ];
+    return orderedKeys
+      .filter((k) => Boolean(scenData[k]))
+      .map((k) => {
+        const entry = scenData[k];
+        const m = entry.metrics || {};
         return {
-          key,
-          name: displayName,
-          calibrator,
+          key: k,
+          name: k,
+          calibrator: entry.calibrator || "Conformal",
           picp: typeof m.picp === "number" ? m.picp : null,
           published_picp:
             typeof m.published_picp === "number" ? m.published_picp : null,
