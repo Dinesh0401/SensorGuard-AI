@@ -712,6 +712,216 @@ def test_commit_completion_proof_stalled_commits_and_competing_inserts(tmp_path)
         )
         assert eval_s3["truly_prospective_count"] == 0
         assert eval_s3["backdated_violation_count"] >= 10
+        assert eval_s3["commit_proof_violation_count"] >= 10
         assert eval_s3["calibration_claim_eligible"] is False
 
     engine.dispose()
+
+
+def test_mandatory_prospective_commit_proof_fault_injection_and_recovery(tmp_path) -> None:
+    """Task B fault injection: Tx1 crash, Tx2 DB failure, missing-proof zero bypass & safe idempotent recovery."""
+    end_hr = datetime(2026, 7, 2, 12, 0, tzinfo=UTC)
+    src_eng, _, t_start, s1_id, s2_id, batch_id = _seed_shadow_db(tmp_path, end_hour_utc=end_hr, n_hours=150)
+    src_eng.dispose()
+    seeded_db = tmp_path / "shadow_eval_m86.db"
+    engine = create_engine(f"sqlite:///{seeded_db}", connect_args={"check_same_thread": False})
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+    try:
+        with factory() as setup_s:
+            df, coords = load_pilot_dataset_from_db(setup_s)
+            featured = build_spatiotemporal_features(df, coords)
+            hist_feat = featured[featured["timestamp"] < (t_start + timedelta(hours=110))].copy()
+            suite = fit_shadow_suite(
+                hist_feat,
+                coords,
+                artifact_dir=tmp_path / "taskb_fault_arts",
+                model_created_at=end_hr - timedelta(hours=2),
+            )
+
+        # Fault 1: Simulated crash IMMEDIATELY AFTER Tx1 commit before Tx2 completion proof writes commit_completed_at
+        c1 = end_hr
+        t1 = c1 + timedelta(hours=1)
+        ticks_crash_tx1 = iter(
+            [t1 - timedelta(seconds=330), t1 - timedelta(seconds=320), t1 - timedelta(seconds=310)]
+        )
+
+        def _crash_right_after_tx1() -> None:
+            raise RuntimeError("Simulated SIGKILL immediately after Tx1 commit before Tx2 proof")
+
+        with (
+            factory() as s_crash,
+            pytest.raises(RuntimeError, match="Simulated SIGKILL immediately after Tx1"),
+        ):
+            generate_prospective_shadow_forecasts(
+                s_crash,
+                [c1],
+                suite,
+                coords,
+                min_lead_seconds=300.0,
+                commit_safety_margin_seconds=15.0,
+                now_fn=lambda: next(ticks_crash_tx1),
+                commit_phase2_fn=_crash_right_after_tx1,
+            )
+
+        with factory() as chk_s:
+            c1_runs = list(chk_s.scalars(select(ForecastRun).where(ForecastRun.decision_cutoff == c1)).all())
+            c1_recs = list(
+                chk_s.scalars(select(ForecastRecord).where(ForecastRecord.decision_cutoff == c1)).all()
+            )
+            assert len(c1_runs) == 5
+            assert len(c1_recs) == 10
+            assert all(r.commit_proof_status == "PENDING_COMPLETION_PROOF" for r in c1_runs)
+            assert all(r.commit_completed_at is None for r in c1_runs)
+            assert all(r.commit_proof_status == "PENDING_COMPLETION_PROOF" for r in c1_recs)
+            assert all(r.commit_completed_at is None for r in c1_recs)
+
+            # Reconciliation MUST NEVER bypass missing commit_completed_at or PENDING_COMPLETION_PROOF!
+            eval_pending = reconcile_shadow_evaluation(
+                chk_s, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+            )
+            assert eval_pending["commit_proof_violation_count"] == 10
+            assert eval_pending["truly_prospective_count"] == 0
+            assert eval_pending["calibration_claim_eligible"] is False
+            assert eval_pending["artifact_integrity_verified"] is False
+
+        # Fault 5a: Safe idempotent retry of incomplete PENDING_COMPLETION_PROOF c1 WHILE STILL TIMELY (>=300s)
+        with factory() as retry_ok_s:
+            recovered = generate_prospective_shadow_forecasts(
+                retry_ok_s,
+                [c1],
+                suite,
+                coords,
+                idempotency_behavior="return",
+                min_lead_seconds=300.0,
+                commit_safety_margin_seconds=15.0,
+                now_fn=lambda: t1 - timedelta(seconds=305),
+            )
+            assert len(recovered) == 5
+            assert (
+                retry_ok_s.scalar(select(func.count(ForecastRun.id)).where(ForecastRun.decision_cutoff == c1))
+                == 5
+            )
+            assert (
+                retry_ok_s.scalar(
+                    select(func.count(ForecastRecord.id)).where(ForecastRecord.decision_cutoff == c1)
+                )
+                == 10
+            )
+            assert all(r.commit_proof_status == "VERIFIED_PROSPECTIVE" for r in recovered)
+            assert all(r.commit_completed_at is not None for r in recovered)
+            # Persist ground-truth after verified commit_completed_at and verify clean evaluation
+            for sid, val in ((s1_id, 18.1), (s2_id, 19.4)):
+                retry_ok_s.add(
+                    Observation(
+                        sensor_id=sid,
+                        raw_batch_id=batch_id,
+                        observed_at=t1,
+                        fetched_at=t1 + timedelta(minutes=2),
+                        persisted_at=t1 + timedelta(minutes=2),
+                        value=val,
+                        quality_flag="VALID",
+                        source_status="HEALTHY",
+                        version=1,
+                    )
+                )
+            retry_ok_s.commit()
+
+            eval_ok = reconcile_shadow_evaluation(
+                retry_ok_s, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+            )
+            assert eval_ok["status"] == "EVALUATED"
+            assert eval_ok["truly_prospective_count"] == 10
+            assert eval_ok["commit_proof_violation_count"] == 0
+            assert eval_ok["calibration_claim_eligible"] is True
+            assert eval_ok["artifact_integrity_verified"] is True
+
+        # Fault 2 + 5b: Failure DURING actual Tx2 session.commit() leaves PENDING_COMPLETION_PROOF,
+        # and late retry transitions in-place to permanent QUARANTINED_TIMING_VIOLATION
+        c2 = end_hr + timedelta(hours=1)
+        t2 = c2 + timedelta(hours=1)
+        commit_counter = {"n": 0}
+
+        def _fail_second_commit(_sess) -> None:
+            commit_counter["n"] += 1
+            if commit_counter["n"] == 2:
+                raise RuntimeError("Simulated DB failure inside Tx2 commit")
+
+        ticks_tx2_fail = iter(
+            [t2 - timedelta(seconds=330), t2 - timedelta(seconds=320), t2 - timedelta(seconds=310)]
+        )
+        with factory() as s_tx2_err:
+            event.listen(s_tx2_err, "before_commit", _fail_second_commit)
+            try:
+                with pytest.raises(RuntimeError, match="Simulated DB failure inside Tx2 commit"):
+                    generate_prospective_shadow_forecasts(
+                        s_tx2_err,
+                        [c2],
+                        suite,
+                        coords,
+                        min_lead_seconds=300.0,
+                        commit_safety_margin_seconds=15.0,
+                        now_fn=lambda: next(ticks_tx2_fail),
+                    )
+            finally:
+                event.remove(s_tx2_err, "before_commit", _fail_second_commit)
+
+        # DB rolled back Tx2 cleanly -> c2 retains PENDING_COMPLETION_PROOF with commit_completed_at=None
+        with factory() as chk_c2_s:
+            c2_runs = list(
+                chk_c2_s.scalars(select(ForecastRun).where(ForecastRun.decision_cutoff == c2)).all()
+            )
+            assert len(c2_runs) == 5
+            assert all(r.commit_proof_status == "PENDING_COMPLETION_PROOF" for r in c2_runs)
+            assert all(r.commit_completed_at is None for r in c2_runs)
+
+            # Retry c2 LATE (200s < 300s min_lead) -> MUST quarantine IN-PLACE with zero duplicate rows!
+            with pytest.raises(ValueError, match="Prospective availability proof failed"):
+                generate_prospective_shadow_forecasts(
+                    chk_c2_s,
+                    [c2],
+                    suite,
+                    coords,
+                    idempotency_behavior="return",
+                    min_lead_seconds=300.0,
+                    commit_safety_margin_seconds=15.0,
+                    now_fn=lambda: t2 - timedelta(seconds=200),
+                )
+
+            assert (
+                chk_c2_s.scalar(select(func.count(ForecastRun.id)).where(ForecastRun.decision_cutoff == c2))
+                == 5
+            )
+            c2_runs_q = list(
+                chk_c2_s.scalars(select(ForecastRun).where(ForecastRun.decision_cutoff == c2)).all()
+            )
+            c2_recs_q = list(
+                chk_c2_s.scalars(select(ForecastRecord).where(ForecastRecord.decision_cutoff == c2)).all()
+            )
+            assert all(r.commit_proof_status == "QUARANTINED_TIMING_VIOLATION" for r in c2_runs_q)
+            assert all(r.commit_proof_status == "QUARANTINED_TIMING_VIOLATION" for r in c2_recs_q)
+
+            # Quarantined batch MUST NEVER be recoverable even if retried with an earlier clock!
+            with pytest.raises(ValueError, match="permanently quarantined"):
+                generate_prospective_shadow_forecasts(
+                    chk_c2_s,
+                    [c2],
+                    suite,
+                    coords,
+                    idempotency_behavior="return",
+                    min_lead_seconds=300.0,
+                    commit_safety_margin_seconds=15.0,
+                    now_fn=lambda: t2 - timedelta(seconds=310),
+                )
+
+            eval_after_q = reconcile_shadow_evaluation(
+                chk_c2_s, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+            )
+            assert eval_after_q["commit_proof_violation_count"] == 10
+            assert eval_after_q["truly_prospective_count"] == 10  # only c1's 10 verified recs count
+            assert eval_after_q["calibration_claim_eligible"] is False
+            assert eval_after_q["artifact_integrity_verified"] is False
+    finally:
+        engine.dispose()

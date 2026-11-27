@@ -271,6 +271,104 @@ def _predict_single_shadow_model(
     )
 
 
+PROOF_STATUS_PENDING = "PENDING_COMPLETION_PROOF"
+PROOF_STATUS_VERIFIED = "VERIFIED_PROSPECTIVE"
+PROOF_STATUS_QUARANTINED = "QUARANTINED_TIMING_VIOLATION"
+PROOF_STATUS_RETROSPECTIVE = "RETROSPECTIVE_REPLAY"
+
+
+def _finalize_commit_completion_proof(
+    session: Session,
+    runs: list[ForecastRun],
+    records: list[ForecastRecord],
+    evaluation_mode: str,
+    sensor_ids: list[int],
+    target_times: list[datetime],
+    min_lead_seconds: float,
+    clock_fn: Callable[[], datetime],
+    commit_phase2_fn: Callable[[], None] | None = None,
+) -> None:
+    """Capture conservative post-commit timestamp and finalize two-phase completion proof (Tx2)."""
+    actual_commit_completed_at = _to_utc(clock_fn()) or datetime.now(UTC)
+    max_pre_commit = max(
+        (_to_utc(r.pre_commit_at) for r in runs if r.pre_commit_at is not None),
+        default=actual_commit_completed_at,
+    )
+    actual_commit_completed_at = max(actual_commit_completed_at, max_pre_commit)
+
+    min_target = min(target_times)
+    min_completed_lead = round(
+        min((tt - actual_commit_completed_at).total_seconds() for tt in target_times), 3
+    )
+    for run in runs:
+        run.commit_completed_at = actual_commit_completed_at
+        run.persisted_at = actual_commit_completed_at
+        run.effective_lead_seconds = min_completed_lead
+    for rec in records:
+        rec_target = _to_utc(rec.target_time) or actual_commit_completed_at
+        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_commit_completed_at
+        rec.commit_completed_at = actual_commit_completed_at
+        rec.persisted_at = actual_commit_completed_at
+        rec.created_at = actual_commit_completed_at
+        rec.effective_lead_seconds = round((rec_target - actual_commit_completed_at).total_seconds(), 3)
+        rec.available_at_decision_cutoff = bool(actual_commit_completed_at <= rec_cutoff)
+
+    if evaluation_mode == "prospective_shadow":
+        completed_lead_s = (min_target - actual_commit_completed_at).total_seconds()
+        crossed_target = actual_commit_completed_at >= min_target or completed_lead_s <= 0.0
+        below_min_lead = completed_lead_s < float(min_lead_seconds)
+        timing_chain_bad = any(
+            (_to_utc(r.generated_at) is None)
+            or (_to_utc(r.pre_commit_at) is None)
+            or (_to_utc(r.generated_at) > _to_utc(r.pre_commit_at))
+            for r in runs
+        )
+        competing_obs = session.scalars(
+            select(Observation.id)
+            .where(
+                Observation.sensor_id.in_(sensor_ids),
+                Observation.observed_at.in_(target_times),
+            )
+            .limit(1)
+        ).first()
+        if crossed_target or below_min_lead or timing_chain_bad or competing_obs is not None:
+            for run in runs:
+                run.commit_proof_status = PROOF_STATUS_QUARANTINED
+                run.notes = (
+                    f"COMMIT_COMPLETION_TIMING_VIOLATION: completed_at={actual_commit_completed_at.isoformat()}, "
+                    f"lead_s={completed_lead_s:.2f}, competing_obs={competing_obs is not None}"
+                )
+            for rec in records:
+                rec.commit_proof_status = PROOF_STATUS_QUARANTINED
+            try:
+                if commit_phase2_fn is not None:
+                    commit_phase2_fn()
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            raise ValueError(
+                f"Prospective availability proof failed after commit completion: "
+                f"completed_at={actual_commit_completed_at.isoformat()}, lead={completed_lead_s:.1f}s "
+                f"(min={float(min_lead_seconds):.1f}s), competing_obs={competing_obs is not None}."
+            )
+        final_status = PROOF_STATUS_VERIFIED
+    else:
+        final_status = PROOF_STATUS_RETROSPECTIVE
+
+    for run in runs:
+        run.commit_proof_status = final_status
+    for rec in records:
+        rec.commit_proof_status = final_status
+    try:
+        if commit_phase2_fn is not None:
+            commit_phase2_fn()
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+
 def _generate_shadow_batch(
     session: Session,
     decision_cutoffs: list[datetime],
@@ -284,8 +382,9 @@ def _generate_shadow_batch(
     min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
     commit_safety_margin_seconds: float = DEFAULT_COMMIT_SAFETY_MARGIN_SECONDS,
     now_fn: Callable[[], datetime] | None = None,
+    commit_phase2_fn: Callable[[], None] | None = None,
 ) -> list[ForecastRun]:
-    """Core generator enforcing verified JSON artifacts, post-commit completion proof & DB idempotency."""
+    """Core generator enforcing verified JSON artifacts, two-phase completion proof & DB idempotency."""
     if evaluation_mode not in {"prospective_shadow", "retrospective_replay"}:
         raise ValueError(f"Unsupported evaluation_mode: {evaluation_mode}")
     if not decision_cutoffs:
@@ -322,39 +421,12 @@ def _generate_shadow_batch(
     nominal_cov = float(fitted_models["nominal_coverage"])
     prov_map = fitted_models.get("model_provenance", {})
 
-    # STRICT M8.7 PROSPECTIVE INVARIANTS:
-    # 1. Verify genuine serialized JSON artifacts & SHA-256 over disk bytes BEFORE prediction
-    # 2. Enforce strictly positive generation lead >= min_lead_seconds & pre-existing target absence
+    # Verify serialized JSON artifacts & SHA-256 over disk bytes BEFORE DB writes
     target_times = [c + timedelta(hours=1) for c in norm_cutoffs]
     runtime_models: dict[str, Any] = {}
     verified_prov: dict[str, dict[str, Any]] = {}
 
     if evaluation_mode == "prospective_shadow":
-        min_target = min(target_times)
-        gen_lead_s = (min_target - actual_generated_at).total_seconds()
-        if gen_lead_s <= 0.0:
-            raise ValueError(
-                f"Backdated prospective violation: actual generation time {actual_generated_at.isoformat()} "
-                f">= target_time {min_target.isoformat()}. Use generate_retrospective_replay_forecasts()."
-            )
-        if gen_lead_s < float(min_lead_seconds):
-            raise ValueError(
-                f"Insufficient prospective lead time at generation: {gen_lead_s:.1f}s < "
-                f"min_lead_seconds {float(min_lead_seconds):.1f}s before {min_target.isoformat()}."
-            )
-        existing_truth = session.scalars(
-            select(Observation.id)
-            .where(
-                Observation.sensor_id.in_(sensor_ids),
-                Observation.observed_at.in_(target_times),
-            )
-            .limit(1)
-        ).first()
-        if existing_truth is not None:
-            raise ValueError(
-                "Backdated prospective violation: target observations already exist in database. "
-                "Retrospective evaluations must use evaluation_mode='retrospective_replay'."
-            )
         for m_key, spec in SHADOW_MODEL_SPECS.items():
             loaded_model, loaded_meta = verify_and_load_shadow_artifact(
                 provenance_entry=prov_map.get(m_key, {}),
@@ -383,7 +455,6 @@ def _generate_shadow_batch(
                 runtime_models[m_key] = loaded_model
                 verified_prov[m_key] = loaded_meta
             else:
-                # Retrospective isolated fallback if explicit in-memory models were supplied without disk artifacts
                 runtime_models[m_key] = fitted_models[m_key]
                 retro_sha = (
                     art_sha
@@ -424,7 +495,6 @@ def _generate_shadow_batch(
         m_meta = verified_prov[m_key]
         imm_ref = str(m_meta["artifact_immutable_ref"])
         art_sha = str(m_meta["artifact_sha256"])
-        train_done_dt = _to_utc(m_meta.get("training_completed_at"))
         created_iso = (
             m_meta["model_created_at"].isoformat()
             if isinstance(m_meta.get("model_created_at"), datetime)
@@ -437,14 +507,44 @@ def _generate_shadow_batch(
         idem_key = hashlib.sha256(idem_raw.encode("utf-8")).hexdigest()
         idem_keys_by_model[m_key] = idem_key
 
-        existing_run = session.scalars(
-            select(ForecastRun).where(ForecastRun.idempotency_key == idem_key)
-        ).first()
+    existing_by_idem = {
+        r.idempotency_key: r
+        for r in session.scalars(
+            select(ForecastRun).where(ForecastRun.idempotency_key.in_(list(idem_keys_by_model.values())))
+        ).all()
+    }
+
+    incomplete_runs: list[ForecastRun] = []
+    for m_key, spec in SHADOW_MODEL_SPECS.items():
+        m_meta = verified_prov[m_key]
+        imm_ref = str(m_meta["artifact_immutable_ref"])
+        art_sha = str(m_meta["artifact_sha256"])
+        train_done_dt = _to_utc(m_meta.get("training_completed_at"))
+        created_iso = (
+            m_meta["model_created_at"].isoformat()
+            if isinstance(m_meta.get("model_created_at"), datetime)
+            else str(m_meta.get("model_created_at") or "")
+        )
+        idem_key = idem_keys_by_model[m_key]
+        existing_run = existing_by_idem.get(idem_key)
         if existing_run is not None:
-            if idempotency_behavior == "return":
-                runs_by_key[m_key] = existing_run
-                continue
-            raise ValueError(f"Duplicate ForecastRun rejected by idempotency_key={idem_key}")
+            if idempotency_behavior != "return":
+                raise ValueError(f"Duplicate ForecastRun rejected by idempotency_key={idem_key}")
+            if (
+                evaluation_mode == "prospective_shadow"
+                and existing_run.commit_proof_status == PROOF_STATUS_QUARANTINED
+            ):
+                raise ValueError(
+                    "ForecastRun batch was permanently quarantined (QUARANTINED_TIMING_VIOLATION) "
+                    "and cannot be recovered on retry."
+                )
+            runs_by_key[m_key] = existing_run
+            if evaluation_mode == "prospective_shadow" and (
+                existing_run.commit_proof_status != PROOF_STATUS_VERIFIED
+                or existing_run.commit_completed_at is None
+            ):
+                incomplete_runs.append(existing_run)
+            continue
 
         new_keys_to_insert.append(m_key)
         run = ForecastRun(
@@ -470,13 +570,106 @@ def _generate_shadow_batch(
             generated_at=actual_generated_at,
             persisted_at=actual_generated_at,
             decision_cutoff=max_cutoff,
+            commit_proof_status=(
+                PROOF_STATUS_PENDING
+                if evaluation_mode == "prospective_shadow"
+                else PROOF_STATUS_RETROSPECTIVE
+            ),
+            commit_completed_at=None,
             notes=f"Milestone 8.7 {evaluation_mode} batch",
         )
         runs_by_key[m_key] = run
 
     if not new_keys_to_insert:
-        return list(runs_by_key.values())
+        if incomplete_runs and evaluation_mode == "prospective_shadow":
+            inc_run_ids = [r.id for r in incomplete_runs]
+            inc_recs = list(
+                session.scalars(select(ForecastRecord).where(ForecastRecord.run_id.in_(inc_run_ids))).all()
+            )
+            snap_pairs = {
+                (s.sensor_id, _to_utc(s.decision_cutoff))
+                for s in session.scalars(
+                    select(ForecastFeatureSnapshot).where(
+                        ForecastFeatureSnapshot.sensor_id.in_(sensor_ids),
+                        ForecastFeatureSnapshot.decision_cutoff.in_(norm_cutoffs),
+                    )
+                ).all()
+            }
+            recs_by_run_id: dict[int, list[ForecastRecord]] = {}
+            for rec in inc_recs:
+                recs_by_run_id.setdefault(rec.run_id, []).append(rec)
+            complete_ok = bool(inc_recs and snap_pairs)
+            if complete_ok:
+                for run in incomplete_runs:
+                    r_recs = recs_by_run_id.get(run.id, [])
+                    rec_pairs = {(r.sensor_id, _to_utc(r.decision_cutoff)) for r in r_recs}
+                    if rec_pairs != snap_pairs or any(
+                        r.artifact_sha256 != run.model_sha256
+                        or r.artifact_immutable_ref != run.artifact_immutable_ref
+                        for r in r_recs
+                    ):
+                        complete_ok = False
+                        break
+            if not complete_ok:
+                for run in incomplete_runs:
+                    run.commit_proof_status = PROOF_STATUS_QUARANTINED
+                    run.notes = "INCOMPLETE_RECORDS_QUARANTINED_ON_RETRY"
+                for rec in inc_recs:
+                    rec.commit_proof_status = PROOF_STATUS_QUARANTINED
+                session.commit()
+                raise ValueError(
+                    "Incomplete PENDING_COMPLETION_PROOF batch has missing or mismatched records "
+                    "and has been permanently quarantined."
+                )
+            _finalize_commit_completion_proof(
+                session=session,
+                runs=incomplete_runs,
+                records=inc_recs,
+                evaluation_mode=evaluation_mode,
+                sensor_ids=sensor_ids,
+                target_times=target_times,
+                min_lead_seconds=min_lead_seconds,
+                clock_fn=clock_fn,
+                commit_phase2_fn=commit_phase2_fn,
+            )
+        return [runs_by_key[k] for k in SHADOW_MODEL_SPECS]
 
+    min_target = min(target_times)
+    if evaluation_mode == "prospective_shadow":
+        gen_lead_s = (min_target - actual_generated_at).total_seconds()
+        if gen_lead_s <= 0.0:
+            raise ValueError(
+                f"Backdated prospective violation: actual generation time {actual_generated_at.isoformat()} "
+                f">= target_time {min_target.isoformat()}. Use generate_retrospective_replay_forecasts()."
+            )
+        if gen_lead_s < float(min_lead_seconds):
+            raise ValueError(
+                f"Insufficient prospective lead time at generation: {gen_lead_s:.1f}s < "
+                f"min_lead_seconds {float(min_lead_seconds):.1f}s before {min_target.isoformat()}."
+            )
+        existing_truth = session.scalars(
+            select(Observation.id)
+            .where(
+                Observation.sensor_id.in_(sensor_ids),
+                Observation.observed_at.in_(target_times),
+            )
+            .limit(1)
+        ).first()
+        if existing_truth is not None:
+            raise ValueError(
+                "Backdated prospective violation: target observations already exist in database. "
+                "Retrospective evaluations must use evaluation_mode='retrospective_replay'."
+            )
+
+    existing_snap_keys = {
+        (s.sensor_id, _to_utc(s.decision_cutoff))
+        for s in session.scalars(
+            select(ForecastFeatureSnapshot).where(
+                ForecastFeatureSnapshot.sensor_id.in_(sensor_ids),
+                ForecastFeatureSnapshot.decision_cutoff.in_(norm_cutoffs),
+            )
+        ).all()
+    }
     pending_snapshots: list[ForecastFeatureSnapshot] = []
     pending_records: list[ForecastRecord] = []
 
@@ -529,16 +722,18 @@ def _generate_shadow_batch(
             feat_json = json.dumps(feat_payload, sort_keys=True)
             feat_hash = hashlib.sha256(feat_json.encode("utf-8")).hexdigest()
 
-            pending_snapshots.append(
-                ForecastFeatureSnapshot(
-                    sensor_id=sens_id,
-                    decision_cutoff=cutoff,
-                    target_time=target_ts,
-                    features_json=feat_json,
-                    feature_hash=feat_hash,
-                    created_at=actual_generated_at,
+            if (sens_id, cutoff) not in existing_snap_keys:
+                existing_snap_keys.add((sens_id, cutoff))
+                pending_snapshots.append(
+                    ForecastFeatureSnapshot(
+                        sensor_id=sens_id,
+                        decision_cutoff=cutoff,
+                        target_time=target_ts,
+                        features_json=feat_json,
+                        feature_hash=feat_hash,
+                        created_at=actual_generated_at,
+                    )
                 )
-            )
 
             row_df = pd.DataFrame([row])
             age_val = float(row.get("age_hours", 999.0))
@@ -574,6 +769,12 @@ def _generate_shadow_batch(
                         min_lead_seconds=float(min_lead_seconds)
                         if evaluation_mode == "prospective_shadow"
                         else 0.0,
+                        commit_proof_status=(
+                            PROOF_STATUS_PENDING
+                            if evaluation_mode == "prospective_shadow"
+                            else PROOF_STATUS_RETROSPECTIVE
+                        ),
+                        commit_completed_at=None,
                         generated_at=actual_generated_at,
                         persisted_at=actual_generated_at,
                         created_at=actual_generated_at,
@@ -581,7 +782,6 @@ def _generate_shadow_batch(
                 )
 
     actual_pre_commit_at = _to_utc(clock_fn()) or datetime.now(UTC)
-    min_target = min(target_times)
     if evaluation_mode == "prospective_shadow":
         pre_commit_lead_s = (min_target - actual_pre_commit_at).total_seconds()
         required_pre_lead = float(min_lead_seconds) + effective_margin
@@ -591,7 +791,7 @@ def _generate_shadow_batch(
                 f"Prospective commit aborted: pre-commit lead time {pre_commit_lead_s:.1f}s < "
                 f"min_lead+safety_margin {required_pre_lead:.1f}s at {actual_pre_commit_at.isoformat()}."
             )
-        # Re-verify before commit that no concurrent poll persisted target truth mid-inference
+        # Re-verify before Tx1 commit that no concurrent poll persisted target truth mid-inference
         late_existing = session.scalars(
             select(Observation.id)
             .where(
@@ -608,9 +808,14 @@ def _generate_shadow_batch(
 
     min_pre_lead = round(min((tt - actual_pre_commit_at).total_seconds() for tt in target_times), 3)
     new_runs = [runs_by_key[m_key] for m_key in new_keys_to_insert]
+    initial_proof = (
+        PROOF_STATUS_PENDING if evaluation_mode == "prospective_shadow" else PROOF_STATUS_RETROSPECTIVE
+    )
     for run in new_runs:
         run.commit_safety_margin_seconds = effective_margin
         run.pre_commit_at = actual_pre_commit_at
+        run.commit_proof_status = initial_proof
+        run.commit_completed_at = None
         run.persisted_at = actual_pre_commit_at
         run.effective_lead_seconds = min_pre_lead
         session.add(run)
@@ -622,6 +827,8 @@ def _generate_shadow_batch(
         rec_cutoff = _to_utc(rec.decision_cutoff) or actual_pre_commit_at
         rec.commit_safety_margin_seconds = effective_margin
         rec.pre_commit_at = actual_pre_commit_at
+        rec.commit_proof_status = initial_proof
+        rec.commit_completed_at = None
         rec.persisted_at = actual_pre_commit_at
         rec.created_at = actual_pre_commit_at
         rec.effective_lead_seconds = round((rec_target - actual_pre_commit_at).total_seconds(), 3)
@@ -633,66 +840,67 @@ def _generate_shadow_batch(
     except IntegrityError:
         session.rollback()
         if idempotency_behavior == "return":
-            existing_rows = list(
-                session.scalars(
-                    select(ForecastRun).where(
-                        ForecastRun.idempotency_key.in_(list(idem_keys_by_model.values()))
-                    )
-                ).all()
-            )
-            if len(existing_rows) == len(SHADOW_MODEL_SPECS):
+            import time as _time
+
+            existing_rows: list[ForecastRun] = []
+            for attempt in range(5):
+                existing_rows = list(
+                    session.scalars(
+                        select(ForecastRun).where(
+                            ForecastRun.idempotency_key.in_(list(idem_keys_by_model.values()))
+                        )
+                    ).all()
+                )
+                if len(existing_rows) == len(SHADOW_MODEL_SPECS):
+                    if evaluation_mode == "retrospective_replay":
+                        return existing_rows
+                    if any(r.commit_proof_status == PROOF_STATUS_QUARANTINED for r in existing_rows):
+                        raise ValueError(
+                            "Concurrent ForecastRun batch is permanently quarantined "
+                            "(QUARANTINED_TIMING_VIOLATION)."
+                        ) from None
+                    if all(
+                        r.commit_proof_status == PROOF_STATUS_VERIFIED and r.commit_completed_at is not None
+                        for r in existing_rows
+                    ):
+                        return existing_rows
+                if attempt < 4:
+                    _time.sleep(0.02)
+            # Peer may have crashed between Tx1 and Tx2; attempt safe Tx2 recovery if complete
+            if len(existing_rows) == len(SHADOW_MODEL_SPECS) and evaluation_mode == "prospective_shadow":
+                peer_recs = list(
+                    session.scalars(
+                        select(ForecastRecord).where(ForecastRecord.run_id.in_([r.id for r in existing_rows]))
+                    ).all()
+                )
+                _finalize_commit_completion_proof(
+                    session=session,
+                    runs=existing_rows,
+                    records=peer_recs,
+                    evaluation_mode=evaluation_mode,
+                    sensor_ids=sensor_ids,
+                    target_times=target_times,
+                    min_lead_seconds=min_lead_seconds,
+                    clock_fn=clock_fn,
+                    commit_phase2_fn=commit_phase2_fn,
+                )
                 return existing_rows
         raise ValueError(
             "Concurrent duplicate ForecastRun rejected by database idempotency constraint."
         ) from None
 
-    # Operational post-commit proof: capture conservative DB completion timestamp AFTER commit() returns
-    actual_commit_completed_at = _to_utc(clock_fn()) or datetime.now(UTC)
-    actual_commit_completed_at = max(actual_commit_completed_at, actual_pre_commit_at)
-
-    min_completed_lead = round(
-        min((tt - actual_commit_completed_at).total_seconds() for tt in target_times), 3
+    _finalize_commit_completion_proof(
+        session=session,
+        runs=new_runs,
+        records=pending_records,
+        evaluation_mode=evaluation_mode,
+        sensor_ids=sensor_ids,
+        target_times=target_times,
+        min_lead_seconds=min_lead_seconds,
+        clock_fn=clock_fn,
+        commit_phase2_fn=commit_phase2_fn,
     )
-    for run in new_runs:
-        run.commit_completed_at = actual_commit_completed_at
-        run.persisted_at = actual_commit_completed_at
-        run.effective_lead_seconds = min_completed_lead
-    for rec in pending_records:
-        rec_target = _to_utc(rec.target_time) or actual_commit_completed_at
-        rec_cutoff = _to_utc(rec.decision_cutoff) or actual_commit_completed_at
-        rec.commit_completed_at = actual_commit_completed_at
-        rec.persisted_at = actual_commit_completed_at
-        rec.created_at = actual_commit_completed_at
-        rec.effective_lead_seconds = round((rec_target - actual_commit_completed_at).total_seconds(), 3)
-        rec.available_at_decision_cutoff = bool(actual_commit_completed_at <= rec_cutoff)
-
-    if evaluation_mode == "prospective_shadow":
-        completed_lead_s = (min_target - actual_commit_completed_at).total_seconds()
-        crossed_target = actual_commit_completed_at >= min_target or completed_lead_s <= 0.0
-        below_min_lead = completed_lead_s < float(min_lead_seconds)
-        competing_obs = session.scalars(
-            select(Observation.id)
-            .where(
-                Observation.sensor_id.in_(sensor_ids),
-                Observation.observed_at.in_(target_times),
-            )
-            .limit(1)
-        ).first()
-        if crossed_target or below_min_lead or competing_obs is not None:
-            for run in new_runs:
-                run.notes = (
-                    f"COMMIT_COMPLETION_TIMING_VIOLATION: completed_at={actual_commit_completed_at.isoformat()}, "
-                    f"lead_s={completed_lead_s:.2f}, competing_obs={competing_obs is not None}"
-                )
-            session.commit()
-            raise ValueError(
-                f"Prospective availability proof failed after commit completion: "
-                f"completed_at={actual_commit_completed_at.isoformat()}, lead={completed_lead_s:.1f}s "
-                f"(min={float(min_lead_seconds):.1f}s), competing_obs={competing_obs is not None}."
-            )
-
-    session.commit()
-    return list(runs_by_key.values())
+    return [runs_by_key[k] for k in SHADOW_MODEL_SPECS]
 
 
 def generate_prospective_shadow_forecasts(
@@ -707,6 +915,7 @@ def generate_prospective_shadow_forecasts(
     min_lead_seconds: float = DEFAULT_MIN_LEAD_SECONDS,
     commit_safety_margin_seconds: float = DEFAULT_COMMIT_SAFETY_MARGIN_SECONDS,
     now_fn: Callable[[], datetime] | None = None,
+    commit_phase2_fn: Callable[[], None] | None = None,
 ) -> list[ForecastRun]:
     """Generate genuine prospective forecasts strictly BEFORE target_time occurs with verified artifacts."""
     return _generate_shadow_batch(
@@ -722,6 +931,7 @@ def generate_prospective_shadow_forecasts(
         min_lead_seconds=min_lead_seconds,
         commit_safety_margin_seconds=commit_safety_margin_seconds,
         now_fn=now_fn,
+        commit_phase2_fn=commit_phase2_fn,
     )
 
 
@@ -863,6 +1073,7 @@ def _evaluate_shadow_subset(
             "backdated_violation_count": 0,
             "lead_time_violation_count": 0,
             "artifact_violation_count": 0,
+            "commit_proof_violation_count": 0,
             "available_at_decision_cutoff_count": 0,
             "post_cutoff_pre_target_count": 0,
             "models": {},
@@ -886,6 +1097,7 @@ def _evaluate_shadow_subset(
             "backdated_violation_count": 0,
             "lead_time_violation_count": 0,
             "artifact_violation_count": 0,
+            "commit_proof_violation_count": 0,
             "available_at_decision_cutoff_count": 0,
             "post_cutoff_pre_target_count": 0,
             "models": {},
@@ -946,6 +1158,7 @@ def _evaluate_shadow_subset(
     total_backdated_violations = 0
     total_lead_violations = 0
     total_artifact_violations = 0
+    total_commit_proof_violations = 0
     total_avail_at_cutoff = 0
     total_post_cutoff_pre_target = 0
     all_lead_seconds: list[float] = []
@@ -961,6 +1174,7 @@ def _evaluate_shadow_subset(
         backdated_violations = 0
         lead_violations = 0
         artifact_violations = 0
+        commit_proof_violations = 0
         avail_at_cutoff_cnt = 0
         post_cutoff_cnt = 0
         prospective_valid_recs = 0
@@ -985,6 +1199,8 @@ def _evaluate_shadow_subset(
             t_completed = _to_utc(rec.commit_completed_at) or _to_utc(run_obj.commit_completed_at)
             if t_completed is not None and t_persisted is not None:
                 t_proof = max(t_completed, t_persisted)
+            elif evaluation_mode == "prospective_shadow":
+                t_proof = None
             else:
                 t_proof = t_completed if t_completed is not None else t_persisted
             t_generated = _to_utc(rec.generated_at) or _to_utc(run_obj.generated_at)
@@ -999,27 +1215,28 @@ def _evaluate_shadow_subset(
                     t_train_done is not None and t_generated is not None and t_train_done <= t_generated
                 )
                 competing_obs_noted = "competing_obs=True" in str(run_obj.notes or "")
-                commit_chain_ok = (
-                    True
-                    if (t_pre_commit is None or t_completed is None)
-                    else bool(
-                        t_generated is not None
-                        and t_generated <= t_pre_commit <= t_completed
-                        and t_persisted is not None
-                        and t_persisted >= t_completed
-                    )
+                proof_status_ok = bool(
+                    rec.commit_proof_status == PROOF_STATUS_VERIFIED
+                    and run_obj.commit_proof_status == PROOF_STATUS_VERIFIED
+                )
+                commit_chain_ok = bool(
+                    proof_status_ok
+                    and not competing_obs_noted
+                    and t_pre_commit is not None
+                    and t_completed is not None
+                    and t_persisted is not None
+                    and t_generated is not None
+                    and t_generated <= t_pre_commit <= t_completed <= t_persisted
                 )
                 pre_target_ok = bool(
                     not competing_obs_noted
-                    and commit_chain_ok
                     and t_target is not None
                     and t_generated is not None
-                    and t_proof is not None
                     and t_persisted is not None
-                    and t_generated <= t_proof
                     and t_generated < t_target
-                    and t_proof < t_target
                     and t_persisted < t_target
+                    and (t_completed is None or t_completed < t_target)
+                    and (t_proof is None or (t_generated <= t_proof < t_target))
                 )
                 actual_lead_s = (
                     (t_target - t_proof).total_seconds()
@@ -1027,7 +1244,7 @@ def _evaluate_shadow_subset(
                     else -1.0
                 )
                 req_lead = max(float(min_lead_seconds), float(rec.min_lead_seconds or 0.0))
-                lead_ok = bool(actual_lead_s > 0.0 and actual_lead_s >= req_lead)
+                lead_ok = bool(t_completed is not None and actual_lead_s > 0.0 and actual_lead_s >= req_lead)
                 obs_pers = _to_utc(obs.persisted_at) if obs is not None else None
                 pre_obs_ok = (
                     True
@@ -1037,13 +1254,16 @@ def _evaluate_shadow_subset(
                 if not art_ok:
                     artifact_violations += 1
                     total_artifact_violations += 1
+                if not commit_chain_ok:
+                    commit_proof_violations += 1
+                    total_commit_proof_violations += 1
                 if not pre_target_ok or not pre_obs_ok or not train_ok:
                     backdated_violations += 1
                     total_backdated_violations += 1
-                if not lead_ok:
+                if t_completed is not None and not lead_ok:
                     lead_violations += 1
                     total_lead_violations += 1
-                if not (art_ok and pre_target_ok and pre_obs_ok and train_ok and lead_ok):
+                if not (art_ok and commit_chain_ok and pre_target_ok and pre_obs_ok and train_ok and lead_ok):
                     continue
 
                 prospective_valid_recs += 1
@@ -1146,6 +1366,7 @@ def _evaluate_shadow_subset(
             and backdated_violations == 0
             and lead_violations == 0
             and artifact_violations == 0
+            and commit_proof_violations == 0
         )
         total_eval = matched + unmatched
 
@@ -1157,6 +1378,7 @@ def _evaluate_shadow_subset(
             "backdated_violation_count": backdated_violations,
             "lead_time_violation_count": lead_violations,
             "artifact_violation_count": artifact_violations,
+            "commit_proof_violation_count": commit_proof_violations,
             "available_at_decision_cutoff_count": avail_at_cutoff_cnt,
             "post_cutoff_pre_target_count": post_cutoff_cnt,
             "min_effective_lead_minutes": round(min(lead_seconds_list) / 60.0, 2)
@@ -1243,6 +1465,7 @@ def _evaluate_shadow_subset(
         and total_backdated_violations == 0
         and total_lead_violations == 0
         and total_artifact_violations == 0
+        and total_commit_proof_violations == 0
     )
 
     # Promotion block: Adaptive SAGE never eligible unless strictly eligible & beating MAR on matched parity
@@ -1255,7 +1478,9 @@ def _evaluate_shadow_subset(
         "calibration_claim_eligible": overall_eligible,
         "adaptive_sage_promotion_eligible": adaptive_promo_ok,
         "artifact_integrity_verified": bool(
-            total_artifact_violations == 0 and total_truly_prospective > 0
+            total_artifact_violations == 0
+            and total_commit_proof_violations == 0
+            and total_truly_prospective > 0
             if evaluation_mode == "prospective_shadow"
             else total_artifact_violations == 0
         ),
@@ -1266,6 +1491,7 @@ def _evaluate_shadow_subset(
         "backdated_violation_count": total_backdated_violations,
         "lead_time_violation_count": total_lead_violations,
         "artifact_violation_count": total_artifact_violations,
+        "commit_proof_violation_count": total_commit_proof_violations,
         "available_at_decision_cutoff_count": total_avail_at_cutoff,
         "post_cutoff_pre_target_count": total_post_cutoff_pre_target,
         "min_effective_lead_minutes": round(min(all_lead_seconds) / 60.0, 2) if all_lead_seconds else None,
