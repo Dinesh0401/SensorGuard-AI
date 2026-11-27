@@ -636,7 +636,10 @@ def run_stage1_preflight(
 
         if db_failure_msg:
             final_status = "ABORTED_DB_FAILURE"
-        elif budget_exhausted:
+        elif budget_exhausted or (
+            run_attempts >= hard_cap and any(v["status"] == "unknown" for v in loc_reports.values())
+        ):
+            budget_exhausted = True
             final_status = "QUOTA_EXHAUSTED"
         elif top_errors:
             final_status = "COMPLETED_WITH_ERRORS"
