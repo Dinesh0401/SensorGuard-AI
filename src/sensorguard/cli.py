@@ -13,7 +13,13 @@ from sensorguard.audit import audit_candidate_location
 from sensorguard.db.session import get_session_factory, init_db
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.ingest import IngestionPipeline
-from sensorguard.preflight import STAGE1_HARD_MAX_ATTEMPTS, Stage1PreflightConfig, run_stage1_preflight
+from sensorguard.preflight import (
+    STAGE1_HARD_MAX_ATTEMPTS,
+    Stage1PreflightConfig,
+    authorize_stage1_preflight_db,
+    authorize_stage1_recovery_db,
+    run_stage1_preflight,
+)
 from sensorguard.providers import OpenAQClient
 from sensorguard.replay import PointInTimeReplayEngine
 from sensorguard.simulation import OutageConfig
