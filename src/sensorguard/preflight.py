@@ -67,7 +67,9 @@ def redact_secrets(text: str | None, extra_secrets: tuple[str | None, ...] = ())
     if not text:
         return ""
     cleaned = str(text)
-    cleaned = re.sub(r"(?i)(x-api-key|api_key|token|password|secret)=([^\s,;'\"]+)", r"\1=[REDACTED]", cleaned)
+    cleaned = re.sub(
+        r"(?i)(x-api-key|api_key|token|password|secret)=([^\s,;'\"]+)", r"\1=[REDACTED]", cleaned
+    )
     cleaned = re.sub(r"://([^:@/\s]+):([^@/\s]+)@", r"://\1:[REDACTED]@", cleaned)
     for sec in extra_secrets:
         if sec and len(sec) >= 4:
@@ -168,9 +170,7 @@ def _load_archived_station_targets(
     """Load archived UK station & PM2.5 sensor inventory from DB preserving configured priority order."""
     order_rank = {loc_id: idx for idx, loc_id in enumerate(location_ids)}
     stations = list(
-        session.scalars(
-            select(Station).where(Station.provider_location_id.in_(list(location_ids)))
-        ).all()
+        session.scalars(select(Station).where(Station.provider_location_id.in_(list(location_ids)))).all()
     )
     stations.sort(key=lambda s: order_rank.get(int(s.provider_location_id), 999))
 
@@ -191,7 +191,9 @@ def _load_archived_station_targets(
         provider_obj = meta.get("provider") if isinstance(meta.get("provider"), dict) else {}
         licenses_raw = meta.get("licenses") if isinstance(meta.get("licenses"), list) else []
         licenses = [str(lic.get("name", "UNKNOWN")) for lic in licenses_raw if isinstance(lic, dict)]
-        dt_last = meta.get("datetimeLast", {}).get("utc") if isinstance(meta.get("datetimeLast"), dict) else None
+        dt_last = (
+            meta.get("datetimeLast", {}).get("utc") if isinstance(meta.get("datetimeLast"), dict) else None
+        )
         targets.append(
             {
                 "station_id": int(st.id),
@@ -220,7 +222,9 @@ def _load_archived_station_targets(
     return targets
 
 
-def _extract_location_attribution(loc_obj: dict[str, Any], fallback_provider: str, fallback_licenses: list[str]) -> dict[str, Any]:
+def _extract_location_attribution(
+    loc_obj: dict[str, Any], fallback_provider: str, fallback_licenses: list[str]
+) -> dict[str, Any]:
     provider_obj = loc_obj.get("provider") if isinstance(loc_obj.get("provider"), dict) else {}
     owner_obj = loc_obj.get("owner") if isinstance(loc_obj.get("owner"), dict) else {}
     licenses_raw = loc_obj.get("licenses") if isinstance(loc_obj.get("licenses"), list) else []
@@ -247,7 +251,9 @@ def _find_pm25_sensor_id(loc_obj: dict[str, Any], fallback_sensor_id: int | None
     return fallback_sensor_id
 
 
-def _write_preflight_artifact(payload: dict[str, Any], config: Stage1PreflightConfig, ts_now: datetime) -> str | None:
+def _write_preflight_artifact(
+    payload: dict[str, Any], config: Stage1PreflightConfig, ts_now: datetime
+) -> str | None:
     if not config.write_artifact and config.output_path is None:
         return None
     target = (
@@ -357,7 +363,12 @@ def run_stage1_preflight(
                 "attempts_consumed": 0,
                 "budget_exhausted": False,
                 "recurring_polling_opt_in_enabled": False,
-                "summary": {"total_locations": len(targets), "active": 0, "inactive": 0, "unknown": len(targets)},
+                "summary": {
+                    "total_locations": len(targets),
+                    "active": 0,
+                    "inactive": 0,
+                    "unknown": len(targets),
+                },
                 "locations": [],
                 "errors": [f"Database check failed cleanly before outbound HTTP requests: {safe_err}"],
                 "artifact_path": None,
@@ -374,7 +385,12 @@ def run_stage1_preflight(
                 "attempts_consumed": 0,
                 "budget_exhausted": False,
                 "recurring_polling_opt_in_enabled": recurring_opt_in_state,
-                "summary": {"total_locations": len(targets), "active": 0, "inactive": 0, "unknown": len(targets)},
+                "summary": {
+                    "total_locations": len(targets),
+                    "active": 0,
+                    "inactive": 0,
+                    "unknown": len(targets),
+                },
                 "locations": [],
                 "errors": [redact_secrets(auth_msg, secrets_tuple)],
             }
@@ -393,7 +409,12 @@ def run_stage1_preflight(
                 "attempts_consumed": 0,
                 "budget_exhausted": False,
                 "recurring_polling_opt_in_enabled": recurring_opt_in_state,
-                "summary": {"total_locations": len(targets), "active": 0, "inactive": 0, "unknown": len(targets)},
+                "summary": {
+                    "total_locations": len(targets),
+                    "active": 0,
+                    "inactive": 0,
+                    "unknown": len(targets),
+                },
                 "locations": [],
                 "errors": ["OPENAQ_API_KEY missing in environment and no mock transport supplied."],
             }
@@ -417,9 +438,16 @@ def run_stage1_preflight(
                 "attempts_consumed": 0,
                 "budget_exhausted": False,
                 "recurring_polling_opt_in_enabled": recurring_opt_in_state,
-                "summary": {"total_locations": len(targets), "active": 0, "inactive": 0, "unknown": len(targets)},
+                "summary": {
+                    "total_locations": len(targets),
+                    "active": 0,
+                    "inactive": 0,
+                    "unknown": len(targets),
+                },
                 "locations": [],
-                "errors": [f"Durable quota database unavailable; failed closed with zero HTTP calls: {safe_err}"],
+                "errors": [
+                    f"Durable quota database unavailable; failed closed with zero HTTP calls: {safe_err}"
+                ],
             }
             db_fail["artifact_path"] = _write_preflight_artifact(db_fail, cfg, now)
             return db_fail
@@ -435,7 +463,9 @@ def run_stage1_preflight(
             with _PREFLIGHT_LOCK:
                 if run_attempts >= hard_cap:
                     budget_exhausted = True
-                    raise QuotaExhaustedError(f"Stage 1 hard attempt ceiling reached ({hard_cap}/{hard_cap}).")
+                    raise QuotaExhaustedError(
+                        f"Stage 1 hard attempt ceiling reached ({hard_cap}/{hard_cap})."
+                    )
                 try:
                     with session_factory() as q_sess:
                         ok = quota_tracker.try_consume(q_sess, count=1, now_utc=now)
@@ -509,7 +539,9 @@ def run_stage1_preflight(
                     )
                     sensor_id = _find_pm25_sensor_id(loc_obj, t["configured_pm25_sensor_id"])
                     entry["pm25_sensor_id"] = sensor_id
-                    dt_last_obj = loc_obj.get("datetimeLast") if isinstance(loc_obj.get("datetimeLast"), dict) else {}
+                    dt_last_obj = (
+                        loc_obj.get("datetimeLast") if isinstance(loc_obj.get("datetimeLast"), dict) else {}
+                    )
                     meta_last_raw = dt_last_obj.get("utc")
                     if meta_last_raw is not None:
                         entry["metadata_last_utc"] = str(meta_last_raw)
@@ -577,7 +609,9 @@ def run_stage1_preflight(
                     entry["status"] = "active" if newest_obs >= recent_cutoff else "inactive"
                 else:
                     entry["status"] = "inactive"
-                    entry["errors"].append(f"no recent hourly PM2.5 measurements within {cfg.recent_hours:.0f}h")
+                    entry["errors"].append(
+                        f"no recent hourly PM2.5 measurements within {cfg.recent_hours:.0f}h"
+                    )
             except QuotaExhaustedError as q_exc:
                 safe_msg = redact_secrets(str(q_exc), secrets_tuple)
                 entry["errors"].append(safe_msg)
@@ -620,7 +654,9 @@ def run_stage1_preflight(
             post_live_ctrl = session.scalars(
                 select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
             ).first()
-            recurring_opt_in_after = bool(post_live_ctrl.opt_in_enabled) if post_live_ctrl is not None else False
+            recurring_opt_in_after = (
+                bool(post_live_ctrl.opt_in_enabled) if post_live_ctrl is not None else False
+            )
             session.add(
                 PilotIngestAuditRun(
                     provider="openaq",
