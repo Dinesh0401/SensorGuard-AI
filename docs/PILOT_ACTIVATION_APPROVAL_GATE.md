@@ -1,20 +1,42 @@
-# SensorGuard AI — Live Pilot Activation Approval Gate & Two-Stage Authorization (Phase 8.7)
+# SensorGuard AI — Live Pilot Activation Approval Gate & Two-Stage Authorization
 
-**Current Operational Status:** **LOCKED / FAIL-CLOSED PENDING OPERATOR AUTHORIZATION**  
-**Stage 1 Readiness (One-Time Pre-Flight Station Availability Check, Max 8–16 HTTP Calls):** **READY FOR EXPLICIT APPROVAL**  
-**Stage 2 Readiness (Recurring Shadow-Live Polling):** **READY FOR EXPLICIT SEPARATE APPROVAL ONLY AFTER STAGE 1 FEED VERIFICATION & OPERATOR SIGN-OFF**  
+**Current Operational Status:** **LOCKED / FAIL-CLOSED PENDING EXPLICIT OPERATOR APPROVAL**  
+**Stage 1 Readiness (One-Time Pre-Flight Station Availability Check, Max 16 HTTP Attempts):** **READY FOR EXPLICIT STAGE 1 AUTHORIZATION**  
+**Stage 2 Readiness (Recurring Shadow-Live Polling):** **NO-GO / HELD PENDING STAGE 1 RESULTS & SEPARATE APPROVAL**  
 **Public Production / Adaptive SAGE Promotion:** **NO-GO (Static `SAGEForecaster` only)**
 
 ---
 
-## 1. Two Separate Operational Authorization Decisions
+## 1. Stage 1 Command, Limits & Credentials (`preflight-stations`)
 
-1. **Decision A — Limited One-Time Pre-Flight Station Availability Check (`<= 16` HTTP requests total):**
-   - Purpose: Probe `/v3/locations/{id}` once across the 8 UK stations below to confirm which sensors currently return active 2026 hourly measurements after provisioning `OPENAQ_API_KEY` server-side.
-   - Prerequisite controls verified: `OpenAQClient` per-attempt quota reservation (`max_requests_per_day <= 48`), single-leader lease, kill switch, and JSON-only shadow artifact verification are implemented and tested.
-2. **Decision B — Recurring Shadow-Live Polling (`shadow_live` mode):**
-   - Requires Stage 1 results first so `BoundedPilotConfig.allowed_location_ids` is restricted strictly to verified active sensors (e.g., LAQN pair `(154, 157)` unless EEA replacements are confirmed).
-   - Requires explicit operator unlock in `PilotControlState` (`kill_switch_active=False`, `opt_in_enabled=True`, non-null `authorized_at`, non-default `updated_by`) alongside `SENSORGUARD_POLLING_KILL_SWITCH=false`.
+The dedicated Stage 1 CLI command ([`src/sensorguard/cli.py`](../src/sensorguard/cli.py), [`src/sensorguard/preflight.py`](../src/sensorguard/preflight.py)) defaults strictly to **dry-run (0 network requests)** unless `--execute-once` AND explicit Stage 1 operator approval are provided. It **never** sets `PilotControlState(control_name="openaq_live_polling").opt_in_enabled = True` for recurring polling.
+
+### Exact Invocation Commands
+
+```bash
+# 1. Default Safe Dry-Run (0 external HTTP calls, lists 8 archived UK locations & attribution)
+python -m sensorguard.cli preflight-stations
+
+# 2. One-Time Bounded Stage 1 Check (requires explicit approval + server-side secrets)
+OPENAQ_API_KEY="<server-side-key>" \
+DATABASE_URL="postgresql+psycopg2://..." \
+SENSORGUARD_POLLING_KILL_SWITCH="false" \
+SENSORGUARD_STAGE1_PREFLIGHT_APPROVED="true" \
+python -m sensorguard.cli preflight-stations \
+  --execute-once \
+  --max-attempts 16 \
+  --authorized-by "<operator-name>" \
+  --output artifacts/preflight/stage1_result.json
+```
+
+### Hard Safety Limits & Expected Request Count
+
+- **Hard Global Cap (`--max-attempts 16`):** Enforced pre-request in `_stage1_attempt_guard` across all retries, 429s, 5xx responses, timeouts, and network errors (`> 16` fails validation immediately).
+- **Expected Request Count:** **`8`–`16` HTTP calls total**:
+  - Phase 1: `8` `/v3/locations/{id}` metadata calls (`154, 157, 141, 153, 698, 804, 1795, 2312`).
+  - Phase 2: Up to `8` `/v3/sensors/{id}/hours?limit=5` recent-measurement probes using only remaining budget (`<= 16` minus Phase 1 attempts/retries).
+- **Durable DB Protection:** Every outbound attempt commits `1` unit into `pilot_quota_states` via `DurablePilotQuotaTracker` before the socket opens. If the durable database is unavailable, execution aborts fail-closed (`BLOCKED_DB_UNAVAILABLE`, `0` network calls).
+- **Secrets Hygiene:** Credentials (`OPENAQ_API_KEY`, `DATABASE_URL`) are loaded server-side only (git-ignored `.env`) and redacted from stdout, logs, DB audit rows, and JSON artifacts (`artifacts/preflight/*` is git-ignored via `artifacts/*`).
 
 ---
 
@@ -22,10 +44,10 @@
 
 All entries below reflect archived DB records with **zero external OpenAQ HTTP calls executed**:
 
-| Priority | Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Last Stored Meta UTC | Pre-Flight Action |
+| Priority | Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Last Stored Meta UTC | Stage 1 Pre-Flight Action |
 |---|---|---|---|---|---|---|---:|
-| **Tier 1** | Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE IN STAGE 1** |
-| **Tier 1** | Bexley - Slade Green | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE IN STAGE 1** |
+| **Tier 1** | Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE ONCE** |
+| **Tier 1** | Bexley - Slade Green | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE ONCE** |
 | **Tier 2** | London Harlington - UKA00472 | `141` | `261` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
 | **Tier 2** | London Hillingdon - UKA00266 | `153` | `1927060` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
 | **Tier 2** | Southampton Centre - UKA00235 | `698` | `1213` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
@@ -35,34 +57,27 @@ All entries below reflect archived DB records with **zero external OpenAQ HTTP c
 
 ---
 
-## 3. Pre-Activation Operator Checklist
+## 3. Emergency Halt & Rollback Behavior
 
-1. **Environment, Database & Secrets Lock:**
-   - Provision `OPENAQ_API_KEY`, `ADMIN_API_KEY`, and PostgreSQL `DATABASE_URL` in server-side `.env` (git-ignored; never exposed in `apps/web`).
-   - Keep `SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV=false` (fail closed HTTP `503` on durable rate-limiter failure).
-   - Confirm `alembic upgrade head` reports `008_m87_artifact_timing_gate (head)`.
-2. **Stage 1 Only — Authorize One-Time Pre-Flight Availability Probe (`<= 16` HTTP Calls):**
-   - Explicitly approve running `/v3/locations/{id}` once across the 8 station IDs and confirm active 2026 PM2.5 sensors + OpenAQ license attribution.
-3. **Stage 2 Only — Authorize Recurring Bounded Shadow Polling (`<= 48` HTTP Attempts/UTC Day):**
-   - Restrict `allowed_location_ids` strictly to live active sensors verified in Stage 1 (`(154, 157)` every **2h** -> `24` best-case / `48` worst-case HTTP attempts/day under `max_retries_per_request=1`).
-   - Run `fit_shadow_suite()` into an immutable artifact directory (`SENSORGUARD_SHADOW_ARTIFACT_DIR`) ensuring SHA-256 verified JSON artifacts (`sensorguard.shadow_artifact.v1`), then issue hourly forecasts via `generate_prospective_shadow_forecasts(..., min_lead_seconds=300.0)` strictly `>= 5` minutes before `:00` target time.
-4. **Minimum Prospective Shadow Duration & Usability Gate Before Promotion:**
-   - Continuous **>= 7 calendar days** (`>= 168` hours target horizon; hard floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`, `min_lead_seconds >= 300`, `backdated_violation_count == 0`, `lead_time_violation_count == 0`, `artifact_violation_count == 0`).
-   - Complete human practitioner study ([REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md); `0` participants currently recruited).
+- **Pre-Flight / Instant Environment Halt:** Set `SENSORGUARD_POLLING_KILL_SWITCH=true` (blocks both Stage 1 `preflight-stations` -> `BLOCKED_KILL_SWITCH` and any recurring poller -> `SKIPPED_KILL_SWITCH` with `0` HTTP calls).
+- **Stage 1 DB Halt / Cleanup:** Remove env approval flags and optionally set `PilotControlState(control_name="openaq_stage1_preflight", kill_switch_active=True, opt_in_enabled=False)`. Recurring `openaq_live_polling` remains untouched and locked (`opt_in_enabled=False`).
+- **Stage 2 Rollback & Schema:** `alembic downgrade 008_m87_artifact_timing_gate` (current head `009_m87_commit_timing`); restore PostgreSQL snapshot via `pg_restore` if needed; follow [MODEL_ROLLBACK.md](MODEL_ROLLBACK.md) for serving artifact rollback.
 
 ---
 
-## 4. Emergency Halt & Rollback
+## 4. Stage 2 Hold Criteria (Not Approved Today)
 
-- **Instant Halt:** Set `SENSORGUARD_POLLING_KILL_SWITCH=true` and restart worker -> returns `SKIPPED_KILL_SWITCH`.
-- **Durable Halt:** Execute `set_polling_kill_switch(session, kill_switch_active=True, opt_in_enabled=False, reason=..., updated_by=operator)`.
-- **Schema Rollback:** `alembic downgrade 007_m86_safety_fencing` (or `006_durable_pilot_control`); restore PostgreSQL snapshot via `pg_restore` if required; follow [MODEL_ROLLBACK.md](MODEL_ROLLBACK.md) for serving rollback.
+Do **not** authorize Stage 2 recurring polling until:
+1. Stage 1 confirms live active feeds and restricts `BoundedPilotConfig.allowed_location_ids` solely to active sensors.
+2. `SENSORGUARD_SHADOW_ARTIFACT_DIR` is provisioned with verified `.json` shadow artifacts (`sensorguard.shadow_artifact.v1`) and prospective forecasts enforce post-commit completion proof (`commit_completed_at`, `min_lead_seconds >= 300s`, `commit_safety_margin_seconds >= 15s`).
+3. Minimum prospective duration (`>= 7` days / `>= 168h`; hard floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`) and practitioner usability study ([REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md)) pass before any model promotion.
 
 ---
 
 ## 5. Formal Operator Sign-Off (Pending)
 
-- **Stage 1 Approval (One-Time Pre-Flight Check `<= 16` HTTP requests):** `NOT YET APPROVED`
-- **Stage 2 Approval (Recurring `shadow_live` Polling `<= 48` attempts/UTC day):** `NOT YET APPROVED`
-- **Approved `allowed_location_ids`:** `[PENDING STAGE 1 RESULT]`
-- **Approved By / UTC Timestamp:** `___________________________`
+- **Stage 1 Approval Wording (to authorize once):**  
+  `Approve one-time Stage 1 OpenAQ station availability pre-flight check (<= 16 HTTP attempts total, no recurring polling, no opt_in_enabled change) across locations (141, 153, 154, 157, 698, 804, 1795, 2312).`
+- **Stage 1 Status:** `NOT YET AUTHORIZED`
+- **Stage 2 Recurring Polling Status:** `NO-GO (HELD)`
+- **Operator Identity / UTC Timestamp:** `___________________________`

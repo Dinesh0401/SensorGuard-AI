@@ -984,6 +984,9 @@ def _evaluate_shadow_subset(
             t_target = _to_utc(rec.target_time)
             t_cutoff = _to_utc(rec.decision_cutoff)
             t_persisted = _to_utc(rec.persisted_at) or _to_utc(rec.created_at)
+            t_pre_commit = _to_utc(rec.pre_commit_at) or _to_utc(run_obj.pre_commit_at)
+            t_completed = _to_utc(rec.commit_completed_at) or _to_utc(run_obj.commit_completed_at)
+            t_proof = t_completed if t_completed is not None else t_persisted
             t_generated = _to_utc(rec.generated_at) or _to_utc(run_obj.generated_at)
             t_train_done = _to_utc(rec.training_completed_at) or _to_utc(run_obj.training_completed_at)
             obs = truth_map.get((rec.sensor_id, t_target)) if t_target else None
@@ -995,17 +998,32 @@ def _evaluate_shadow_subset(
                 train_ok = bool(
                     t_train_done is not None and t_generated is not None and t_train_done <= t_generated
                 )
+                notes_violation = "COMMIT_COMPLETION_TIMING_VIOLATION" in str(run_obj.notes or "")
+                commit_chain_ok = (
+                    True
+                    if (t_pre_commit is None or t_completed is None)
+                    else bool(
+                        t_generated is not None
+                        and t_generated <= t_pre_commit <= t_completed
+                        and t_persisted is not None
+                        and t_persisted >= t_completed
+                    )
+                )
                 pre_target_ok = bool(
-                    t_target is not None
+                    not notes_violation
+                    and commit_chain_ok
+                    and t_target is not None
                     and t_generated is not None
+                    and t_proof is not None
                     and t_persisted is not None
-                    and t_generated <= t_persisted
+                    and t_generated <= t_proof
                     and t_generated < t_target
+                    and t_proof < t_target
                     and t_persisted < t_target
                 )
                 actual_lead_s = (
-                    (t_target - t_persisted).total_seconds()
-                    if (t_target is not None and t_persisted is not None)
+                    (t_target - t_proof).total_seconds()
+                    if (t_target is not None and t_proof is not None)
                     else -1.0
                 )
                 req_lead = max(float(min_lead_seconds), float(rec.min_lead_seconds or 0.0))
@@ -1014,7 +1032,7 @@ def _evaluate_shadow_subset(
                 pre_obs_ok = (
                     True
                     if obs is None
-                    else bool(obs_pers is not None and t_persisted is not None and obs_pers > t_persisted)
+                    else bool(obs_pers is not None and t_proof is not None and obs_pers > t_proof)
                 )
                 if not art_ok:
                     artifact_violations += 1
@@ -1032,14 +1050,14 @@ def _evaluate_shadow_subset(
                 total_truly_prospective += 1
                 lead_seconds_list.append(actual_lead_s)
                 all_lead_seconds.append(actual_lead_s)
-                if t_cutoff is not None and t_persisted is not None and t_persisted <= t_cutoff:
+                if t_cutoff is not None and t_proof is not None and t_proof <= t_cutoff:
                     avail_at_cutoff_cnt += 1
                     total_avail_at_cutoff += 1
                 else:
                     post_cutoff_cnt += 1
                     total_post_cutoff_pre_target += 1
-            elif t_target is not None and t_persisted is not None:
-                lead_seconds_list.append((t_target - t_persisted).total_seconds())
+            elif t_target is not None and t_proof is not None:
+                lead_seconds_list.append((t_target - t_proof).total_seconds())
 
             src_age = (
                 max(0.0, (t_cutoff - _to_utc(rec.newest_source_observed_at)).total_seconds() / 3600.0)
