@@ -246,11 +246,32 @@ def test_stage1_preflight_bounded_mock_checks_retries_quota_and_secret_redaction
             transport=httpx.MockTransport(mock_500_storm),
             now_utc=now + timedelta(days=1),
         )
-        assert retry_hits <= 16
+        assert retry_hits == 16
         assert res_retry["attempts_consumed"] == 16
         assert res_retry["budget_exhausted"] is True
         assert res_retry["status"] == "QUOTA_EXHAUSTED"
         assert res_retry["summary"]["unknown"] == 8
+
+        # Also test strict budget exhaustion under smaller cap (<16) halts BEFORE attempting request #7
+        art_cap6 = tmp_path / "stage1_cap6.json"
+        cap6_hits = 0
+
+        def mock_cap6(request: httpx.Request) -> httpx.Response:
+            nonlocal cap6_hits
+            cap6_hits += 1
+            return httpx.Response(500, json={"detail": f"x-api-key={secret_api_key} err"})
+
+        res_cap6 = run_stage1_preflight(
+            factory,
+            Stage1PreflightConfig(execute_once=True, max_attempts=6, output_path=art_cap6),
+            api_key=secret_api_key,
+            transport=httpx.MockTransport(mock_cap6),
+            now_utc=now + timedelta(days=3),
+        )
+        assert cap6_hits == 6
+        assert res_cap6["attempts_consumed"] == 6
+        assert res_cap6["budget_exhausted"] is True
+        assert res_cap6["status"] == "QUOTA_EXHAUSTED"
 
         # Verify ZERO secret strings in artifacts, logs, or audit rows
         assert secret_api_key not in art_file.read_text(encoding="utf-8")

@@ -629,6 +629,7 @@ def test_commit_completion_proof_stalled_commits_and_competing_inserts(tmp_path)
             session, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
         )
         assert eval_s1["lead_time_violation_count"] == 10
+        assert eval_s1["backdated_violation_count"] == 0
         assert eval_s1["truly_prospective_count"] == 0
         assert eval_s1["calibration_claim_eligible"] is False
 

@@ -983,7 +983,10 @@ def _evaluate_shadow_subset(
             t_persisted = _to_utc(rec.persisted_at) or _to_utc(rec.created_at)
             t_pre_commit = _to_utc(rec.pre_commit_at) or _to_utc(run_obj.pre_commit_at)
             t_completed = _to_utc(rec.commit_completed_at) or _to_utc(run_obj.commit_completed_at)
-            t_proof = t_completed if t_completed is not None else t_persisted
+            if t_completed is not None and t_persisted is not None:
+                t_proof = max(t_completed, t_persisted)
+            else:
+                t_proof = t_completed if t_completed is not None else t_persisted
             t_generated = _to_utc(rec.generated_at) or _to_utc(run_obj.generated_at)
             t_train_done = _to_utc(rec.training_completed_at) or _to_utc(run_obj.training_completed_at)
             obs = truth_map.get((rec.sensor_id, t_target)) if t_target else None
@@ -995,7 +998,7 @@ def _evaluate_shadow_subset(
                 train_ok = bool(
                     t_train_done is not None and t_generated is not None and t_train_done <= t_generated
                 )
-                notes_violation = "COMMIT_COMPLETION_TIMING_VIOLATION" in str(run_obj.notes or "")
+                competing_obs_noted = "competing_obs=True" in str(run_obj.notes or "")
                 commit_chain_ok = (
                     True
                     if (t_pre_commit is None or t_completed is None)
@@ -1007,7 +1010,7 @@ def _evaluate_shadow_subset(
                     )
                 )
                 pre_target_ok = bool(
-                    not notes_violation
+                    not competing_obs_noted
                     and commit_chain_ok
                     and t_target is not None
                     and t_generated is not None
