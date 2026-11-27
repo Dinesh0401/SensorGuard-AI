@@ -236,6 +236,7 @@ class ForecastRun(Base):
     commit_completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
+    commit_proof_status: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     issued_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -302,6 +303,7 @@ class ForecastRecord(Base):
     available_at_decision_cutoff: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pre_commit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     commit_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    commit_proof_status: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
@@ -427,3 +429,34 @@ class PilotApiRateLimit(Base):
     )
 
     __table_args__ = (UniqueConstraint("scope", "window_minute_utc", name="uq_pilot_api_rate_scope_window"),)
+
+
+class Stage1PreflightAuthorization(Base):
+    """Single-use atomic DB authorization token & execution ledger for bounded Stage 1 OpenAQ probes."""
+
+    __tablename__ = "stage1_preflight_authorizations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="AUTHORIZED", index=True)
+    execution_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True, index=True)
+    authorized_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    authorized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=16)
+    attempts_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    recovered_from_approval_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claimed_by_worker: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
