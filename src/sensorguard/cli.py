@@ -173,13 +173,16 @@ def _run_authorize_stage1(args: argparse.Namespace) -> None:
                 row = authorize_stage1_preflight_db(
                     session,
                     authorized_by=args.authorized_by,
-                    reason=args.reason or "Explicit single-use Stage 1 station availability check authorization",
+                    reason=args.reason
+                    or "Explicit single-use Stage 1 station availability check authorization",
                     max_attempts=args.max_attempts or STAGE1_HARD_MAX_ATTEMPTS,
                 )
             session.commit()
         except ValueError as exc:
             session.rollback()
-            print(json.dumps({"status": "AUTHORIZATION_REJECTED", "error": str(exc)}, indent=2), file=sys.stderr)
+            print(
+                json.dumps({"status": "AUTHORIZATION_REJECTED", "error": str(exc)}, indent=2), file=sys.stderr
+            )
             sys.exit(2)
         payload = {
             "status": row.status,
