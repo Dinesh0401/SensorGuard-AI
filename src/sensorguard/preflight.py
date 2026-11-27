@@ -229,9 +229,9 @@ def authorize_stage1_recovery_db(
         .values(
             status="SUPERSEDED_RECOVERED",
             finished_at=prior.finished_at or now,
-            error_summary=(
-                f"{prior.error_summary or ''} | Superseded by {actor}: {clean_reason}"
-            ).strip(" |"),
+            error_summary=(f"{prior.error_summary or ''} | Superseded by {actor}: {clean_reason}").strip(
+                " |"
+            ),
             updated_at=now,
         )
         .execution_options(synchronize_session=False)
@@ -300,7 +300,13 @@ def _claim_single_use_approval(
     """Enforce kill switches & atomically transition AUTHORIZED -> CLAIMED_IN_PROGRESS once only."""
     env_kill = os.getenv("SENSORGUARD_POLLING_KILL_SWITCH", "false").lower() in {"1", "true", "yes"}
     if env_kill:
-        return False, "BLOCKED_KILL_SWITCH", "Environment SENSORGUARD_POLLING_KILL_SWITCH is active.", None, None
+        return (
+            False,
+            "BLOCKED_KILL_SWITCH",
+            "Environment SENSORGUARD_POLLING_KILL_SWITCH is active.",
+            None,
+            None,
+        )
 
     live_ctrl = session.scalars(
         select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
@@ -831,7 +837,9 @@ def run_stage1_preflight(
                         sensor_id = _find_pm25_sensor_id(loc_obj, t["configured_pm25_sensor_id"])
                         entry["pm25_sensor_id"] = sensor_id
                         dt_last_obj = (
-                            loc_obj.get("datetimeLast") if isinstance(loc_obj.get("datetimeLast"), dict) else {}
+                            loc_obj.get("datetimeLast")
+                            if isinstance(loc_obj.get("datetimeLast"), dict)
+                            else {}
                         )
                         meta_last_raw = dt_last_obj.get("utc")
                         if meta_last_raw is not None:

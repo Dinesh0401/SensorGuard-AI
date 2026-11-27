@@ -187,8 +187,8 @@ def _run_authorize_stage1(args: argparse.Namespace) -> None:
             "authorized_by": row.authorized_by,
             "reason": row.reason,
             "max_attempts": row.max_attempts,
-            "remaining_attempts": row.remaining_attempts,
-            "prior_approval_id": row.prior_approval_id,
+            "remaining_attempts": int(row.max_attempts) - int(row.attempts_consumed),
+            "recovered_from_approval_id": row.recovered_from_approval_id,
             "single_use": True,
             "next_command": (
                 f"python -m sensorguard.cli preflight-stations --execute-once "
