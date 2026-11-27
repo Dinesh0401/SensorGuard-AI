@@ -130,6 +130,7 @@ def _run_preflight_stations(args: argparse.Namespace) -> None:
 
     cfg = Stage1PreflightConfig(
         execute_once=bool(args.execute_once),
+        approval_id=args.approval_id,
         max_attempts=int(args.max_attempts),
         max_daily_quota=int(args.daily_cap),
         recent_hours=float(args.recent_hours),
@@ -141,6 +142,60 @@ def _run_preflight_stations(args: argparse.Namespace) -> None:
     print(json.dumps(report, indent=2, default=str))
     if str(report.get("status", "")).startswith(("BLOCKED_", "ABORTED_")):
         sys.exit(2)
+
+
+def _run_authorize_stage1(args: argparse.Namespace) -> None:
+    if not args.confirm_single_use:
+        print(
+            json.dumps(
+                {
+                    "status": "INVALID_ARGUMENTS",
+                    "error": "--confirm-single-use is required to issue a single-use Stage 1 approval token.",
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        try:
+            if args.recover_from_approval_id:
+                row = authorize_stage1_recovery_db(
+                    session,
+                    prior_approval_id=args.recover_from_approval_id,
+                    authorized_by=args.authorized_by,
+                    reason=args.reason,
+                    max_attempts=args.max_attempts,
+                    allow_budget_reset=bool(args.allow_budget_reset),
+                )
+            else:
+                row = authorize_stage1_preflight_db(
+                    session,
+                    authorized_by=args.authorized_by,
+                    reason=args.reason or "Explicit single-use Stage 1 station availability check authorization",
+                    max_attempts=args.max_attempts or STAGE1_HARD_MAX_ATTEMPTS,
+                )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            print(json.dumps({"status": "AUTHORIZATION_REJECTED", "error": str(exc)}, indent=2), file=sys.stderr)
+            sys.exit(2)
+        payload = {
+            "status": row.status,
+            "approval_id": row.approval_id,
+            "authorized_by": row.authorized_by,
+            "reason": row.reason,
+            "max_attempts": row.max_attempts,
+            "remaining_attempts": row.remaining_attempts,
+            "prior_approval_id": row.prior_approval_id,
+            "single_use": True,
+            "next_command": (
+                f"python -m sensorguard.cli preflight-stations --execute-once "
+                f"--approval-id {row.approval_id} --authorized-by {row.authorized_by}"
+            ),
+        }
+    print(json.dumps(payload, indent=2, default=str))
 
 
 def _load_local_env() -> None:
@@ -208,6 +263,12 @@ def main() -> None:
         help="Actually issue bounded Stage 1 OpenAQ HTTP requests (default is 0-network dry-run)",
     )
     p_preflight.add_argument(
+        "--approval-id",
+        type=str,
+        default=None,
+        help="Single-use DB authorization token minted via authorize-stage1 (required for --execute-once)",
+    )
+    p_preflight.add_argument(
         "--max-attempts",
         type=int,
         default=STAGE1_HARD_MAX_ATTEMPTS,
@@ -233,6 +294,42 @@ def main() -> None:
         help="Do not write JSON report artifact to disk",
     )
     p_preflight.set_defaults(func=_run_preflight_stations)
+
+    # authorize-stage1 (mint single-use DB approval token; never makes HTTP calls or enables Stage 2)
+    p_auth = subparsers.add_parser(
+        "authorize-stage1",
+        help="Issue an explicit single-use DB approval token for one Stage 1 preflight execution",
+    )
+    p_auth.add_argument("--authorized-by", type=str, required=True, help="Non-default operator identity")
+    p_auth.add_argument(
+        "--reason",
+        type=str,
+        default="Explicit single-use Stage 1 station availability check authorization",
+        help="Audit reason recorded in stage1_preflight_authorizations",
+    )
+    p_auth.add_argument(
+        "--max-attempts",
+        type=int,
+        default=None,
+        help="Hard HTTP attempt budget for this token (1..16; defaults to remaining budget on recovery or 16)",
+    )
+    p_auth.add_argument(
+        "--confirm-single-use",
+        action="store_true",
+        help="Required confirmation flag acknowledging single-use approval semantics",
+    )
+    p_auth.add_argument(
+        "--recover-from-approval-id",
+        type=str,
+        default=None,
+        help="Optional prior FAILED_INCOMPLETE / CLAIMED_IN_PROGRESS approval ID to supersede via audited recovery",
+    )
+    p_auth.add_argument(
+        "--allow-budget-reset",
+        action="store_true",
+        help="Explicitly allow resetting request budget during recovery (default carries over remaining attempts only)",
+    )
+    p_auth.set_defaults(func=_run_authorize_stage1)
 
     args = parser.parse_args()
     args.func(args)
