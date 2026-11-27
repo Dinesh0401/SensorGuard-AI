@@ -1,6 +1,6 @@
 # SensorGuard AI — Prospective Shadow Timestamp Invariants & Evaluation Protocol (Phase 8.7)
 
-**Implementation:** [`src/sensorguard/models/shadow_artifacts.py`](../src/sensorguard/models/shadow_artifacts.py) · [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/008_m87_artifact_timing_gate.py`](../alembic/versions/008_m87_artifact_timing_gate.py)  
+**Implementation:** [`src/sensorguard/models/shadow_artifacts.py`](../src/sensorguard/models/shadow_artifacts.py) · [`src/sensorguard/shadow_eval.py`](../src/sensorguard/shadow_eval.py) · [`src/sensorguard/db/schema.py`](../src/sensorguard/db/schema.py) · [`alembic/versions/009_m87_commit_timing.py`](../alembic/versions/009_m87_commit_timing.py)  
 **Test Suite:** [`tests/test_shadow_eval.py`](../tests/test_shadow_eval.py) · [`tests/test_live_pilot_dry_run.py`](../tests/test_live_pilot_dry_run.py)
 
 ---
@@ -25,7 +25,7 @@ Every `ForecastRecord` and `ForecastRun` persists six distinct timing measuremen
 | `decision_cutoff` | Declared end of causal telemetry window visible via `PointInTimeReplayEngine` | `decision_cutoff <= target_time - 1h` |
 | `target_time` | Verification hour (`decision_cutoff + 1h`) | Absent from DB `observations` before generation AND commit |
 | `generated_at` | Actual UTC wall-clock inference start time | `(target_time - generated_at).total_seconds() >= min_lead_seconds` |
-| `persisted_at` | Actual UTC wall-clock transaction commit time | `(target_time - persisted_at).total_seconds() >= min_lead_seconds` (`> 0`); `obs.persisted_at > persisted_at` |
+| `persisted_at` | Conservative database completion timestamp (updated immediately **after** Tx1 `session.commit()` returns to match `commit_completed_at`; pre-commit gated by `min_lead_seconds + commit_safety_margin_seconds` (`300s + 15s = 315s`)) | `(target_time - commit_completed_at).total_seconds() >= min_lead_seconds` (`> 0`); `obs.persisted_at > commit_completed_at`; flagged `COMMIT_COMPLETION_TIMING_VIOLATION` if commit stalls across thresholds or target arrival |
 | `effective_lead_seconds` | Actual lead remaining at DB commit: `(target_time - persisted_at).total_seconds()` | Strictly positive (`>= min_lead_seconds`, default **`300.0`s / 5 minutes**) |
 | `available_at_decision_cutoff` | Boolean truthfulness flag (`persisted_at <= decision_cutoff`) | Strictly `False` whenever generated or persisted after `decision_cutoff` (counted separately under `post_cutoff_pre_target_count`) |
 

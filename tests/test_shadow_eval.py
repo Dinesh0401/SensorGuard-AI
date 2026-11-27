@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -562,5 +562,155 @@ def test_prospective_lead_time_boundaries_delayed_commit_and_concurrency(tmp_pat
                 min_lead_seconds=300.0,
                 now_fn=_inject_truth_mid_run,
             )
+
+    engine.dispose()
+
+
+def test_commit_completion_proof_stalled_commits_and_competing_inserts(tmp_path) -> None:
+    """Adversarial Task B tests: pre-commit safety margin, stalled commits, threshold/target crossings & competing inserts."""
+    end_hr = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+    src_eng, _, t_start, s1_id, _, batch_id = _seed_shadow_db(tmp_path, end_hour_utc=end_hr, n_hours=150)
+    src_eng.dispose()
+    seeded_db = tmp_path / "shadow_eval_m86.db"
+    engine = create_engine(f"sqlite:///{seeded_db}", connect_args={"check_same_thread": False})
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+    with factory() as session:
+        df, coords = load_pilot_dataset_from_db(session)
+        featured = build_spatiotemporal_features(df, coords)
+        hist_feat = featured[featured["timestamp"] < (t_start + timedelta(hours=110))].copy()
+        suite = fit_shadow_suite(
+            hist_feat,
+            coords,
+            artifact_dir=tmp_path / "commit_proof_arts",
+            model_created_at=end_hr - timedelta(hours=2),
+        )
+
+        # 1. Pre-commit safety margin rejection: 310s lead passes 300s min_lead alone,
+        #    but MUST fail pre-commit check against 300s + 15s = 315s safety margin (0 rows committed)
+        c1 = end_hr
+        t1 = c1 + timedelta(hours=1)
+        ticks_margin = iter([t1 - timedelta(seconds=320), t1 - timedelta(seconds=310)])
+        with pytest.raises(ValueError, match="min_lead\\+safety_margin"):
+            generate_prospective_shadow_forecasts(
+                session,
+                [c1],
+                suite,
+                coords,
+                min_lead_seconds=300.0,
+                commit_safety_margin_seconds=15.0,
+                now_fn=lambda: next(ticks_margin),
+            )
+        assert session.scalar(select(func.count(ForecastRun.id))) == 0
+
+        # 2. Stalled commit crossing min_lead_seconds AFTER Tx1 pre-commit passed:
+        #    gen=330s, pre_commit=320s (>=315s!), Tx1 commit stalls 30s -> commit_completed_at=290s (<300s!)
+        ticks_stall_lead = iter(
+            [t1 - timedelta(seconds=330), t1 - timedelta(seconds=320), t1 - timedelta(seconds=290)]
+        )
+        with pytest.raises(ValueError, match="Prospective availability proof failed"):
+            generate_prospective_shadow_forecasts(
+                session,
+                [c1],
+                suite,
+                coords,
+                min_lead_seconds=300.0,
+                commit_safety_margin_seconds=15.0,
+                now_fn=lambda: next(ticks_stall_lead),
+            )
+        # Stored rows MUST reflect conservative post-commit time (290s lead) & quarantine cleanly
+        recs_s1 = list(session.scalars(select(ForecastRecord)).all())
+        assert len(recs_s1) == 10
+        assert all(r.effective_lead_seconds == pytest.approx(290.0, abs=0.1) for r in recs_s1)
+        assert all(r.persisted_at == r.commit_completed_at for r in recs_s1)
+        eval_s1 = reconcile_shadow_evaluation(
+            session, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+        )
+        assert eval_s1["lead_time_violation_count"] == 10
+        assert eval_s1["truly_prospective_count"] == 0
+        assert eval_s1["calibration_claim_eligible"] is False
+
+    # 3. Stalled commit finishing AFTER target_time (commit_completed_at = target + 80s):
+    #    MUST NEVER claim record was stored before target_time!
+    with factory() as s2:
+        c2 = end_hr + timedelta(hours=1)
+        t2 = c2 + timedelta(hours=1)
+        ticks_cross_target = iter(
+            [t2 - timedelta(seconds=330), t2 - timedelta(seconds=320), t2 + timedelta(seconds=80)]
+        )
+        with pytest.raises(ValueError, match="Prospective availability proof failed"):
+            generate_prospective_shadow_forecasts(
+                s2,
+                [c2],
+                suite,
+                coords,
+                min_lead_seconds=300.0,
+                commit_safety_margin_seconds=15.0,
+                now_fn=lambda: next(ticks_cross_target),
+            )
+        c2_recs = list(s2.scalars(select(ForecastRecord).where(ForecastRecord.target_time == t2)).all())
+        assert len(c2_recs) == 10
+        assert all(
+            (r.persisted_at.replace(tzinfo=UTC) if r.persisted_at.tzinfo is None else r.persisted_at) > t2
+            for r in c2_recs
+        )
+        eval_s2 = reconcile_shadow_evaluation(
+            s2, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+        )
+        assert eval_s2["backdated_violation_count"] == 10
+        assert eval_s2["truly_prospective_count"] == 0
+
+    # 4. Competing target Observation committed DURING Tx1 session.commit() (between pre_commit & completion)
+    with factory() as s3:
+        c3 = end_hr + timedelta(hours=2)
+        t3 = c3 + timedelta(hours=1)
+        injected_once = {"done": False}
+
+        def _after_tx1_commit(_sess) -> None:
+            if not injected_once["done"]:
+                injected_once["done"] = True
+                # Simulate competing ingestion worker persisting target outcome just before commit completion check
+                with factory() as comp_s:
+                    comp_s.add(
+                        Observation(
+                            sensor_id=s1_id,
+                            raw_batch_id=batch_id,
+                            observed_at=t3,
+                            fetched_at=t3 - timedelta(seconds=310),
+                            persisted_at=t3 - timedelta(seconds=310),
+                            value=17.3,
+                            quality_flag="VALID",
+                            source_status="HEALTHY",
+                            version=1,
+                        )
+                    )
+                    comp_s.commit()
+
+        event.listen(s3, "after_commit", _after_tx1_commit)
+        try:
+            ticks_comp = iter(
+                [t3 - timedelta(seconds=330), t3 - timedelta(seconds=320), t3 - timedelta(seconds=305)]
+            )
+            with pytest.raises(ValueError, match="competing_obs=True"):
+                generate_prospective_shadow_forecasts(
+                    s3,
+                    [c3],
+                    suite,
+                    coords,
+                    min_lead_seconds=300.0,
+                    commit_safety_margin_seconds=15.0,
+                    now_fn=lambda: next(ticks_comp),
+                )
+        finally:
+            event.remove(s3, "after_commit", _after_tx1_commit)
+
+        eval_s3 = reconcile_shadow_evaluation(
+            s3, min_matched_outcomes=2, min_unique_hours=1, min_lead_seconds=300.0
+        )
+        assert eval_s3["truly_prospective_count"] == 0
+        assert eval_s3["backdated_violation_count"] >= 10
+        assert eval_s3["calibration_claim_eligible"] is False
 
     engine.dispose()
