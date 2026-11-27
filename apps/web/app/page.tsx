@@ -31,6 +31,8 @@ import {
 
 type ScenarioKey = "natural" | "mcar_20" | "mnar_gamma_1.5" | "burst_24h";
 
+const IS_STATIC_PORTFOLIO = process.env.NEXT_PUBLIC_STATIC_PORTFOLIO === "true";
+
 const SCENARIO_LABELS: Record<
   ScenarioKey,
   { title: string; badge: string; isSimulated: boolean; description: string }
@@ -135,8 +137,10 @@ export default function StagingDashboard() {
     setIsLoading(true);
     setApiError(null);
 
-    if (forceDemoMode) {
-      activateDemoFallback("Manual Demonstration Mode enabled by operator.");
+    if (forceDemoMode || IS_STATIC_PORTFOLIO) {
+      activateDemoFallback(
+        forceDemoMode ? "Manual Demonstration Mode enabled by operator." : null
+      );
       setIsLoading(false);
       return;
     }
