@@ -402,20 +402,26 @@ export default function StagingDashboard() {
                   : "bg-emerald-400 animate-pulse"
               }`}
             ></span>
-            {isDemoMode ? "Demo Mode (Offline Fixtures)" : "FastAPI Connected"}
+            {IS_STATIC_PORTFOLIO && !forceDemoMode
+              ? "Portfolio Demo (Q1 2024 Fixtures)"
+              : isDemoMode
+              ? "Demo Mode (Offline Fixtures)"
+              : "FastAPI Connected"}
           </span>
-          <button
-            type="button"
-            aria-label={
-              forceDemoMode
-                ? "Switch back to live API mode"
-                : "Enable demonstration fallback mode"
-            }
-            onClick={() => setForceDemoMode((prev) => !prev)}
-            className="bg-slate-900/70 hover:bg-slate-800 border border-slate-700 px-2 py-0.5 rounded text-[11px] font-mono text-slate-200 transition"
-          >
-            {forceDemoMode ? "Exit Demo Mode" : "Toggle Demo Mode"}
-          </button>
+          {!IS_STATIC_PORTFOLIO && (
+            <button
+              type="button"
+              aria-label={
+                forceDemoMode
+                  ? "Switch back to live API mode"
+                  : "Enable demonstration fallback mode"
+              }
+              onClick={() => setForceDemoMode((prev) => !prev)}
+              className="bg-slate-900/70 hover:bg-slate-800 border border-slate-700 px-2 py-0.5 rounded text-[11px] font-mono text-slate-200 transition"
+            >
+              {forceDemoMode ? "Exit Demo Mode" : "Toggle Demo Mode"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -425,20 +431,31 @@ export default function StagingDashboard() {
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-indigo-400 shrink-0" />
             <span>
-              <strong>Demonstration Mode Active:</strong> Showing audited Q1 2024 fallback fixtures
-              {apiError ? ` (${apiError})` : "."}
+              <strong>
+                {IS_STATIC_PORTFOLIO && !forceDemoMode
+                  ? "Portfolio Static Mode:"
+                  : "Demonstration Mode Active:"}
+              </strong>{" "}
+              Showing audited Q1 2024 fallback fixtures
+              {IS_STATIC_PORTFOLIO && !forceDemoMode
+                ? " (static showcase build; run FastAPI locally for live backend endpoints)."
+                : apiError
+                ? ` (${apiError})`
+                : "."}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              setForceDemoMode(false);
-              loadInitialData();
-            }}
-            className="flex items-center gap-1 bg-indigo-600/50 hover:bg-indigo-600/70 px-2.5 py-1 rounded text-[11px] transition"
-          >
-            <RefreshCw className="w-3 h-3" /> Retry Live API
-          </button>
+          {!IS_STATIC_PORTFOLIO && (
+            <button
+              type="button"
+              onClick={() => {
+                setForceDemoMode(false);
+                loadInitialData();
+              }}
+              className="flex items-center gap-1 bg-indigo-600/50 hover:bg-indigo-600/70 px-2.5 py-1 rounded text-[11px] transition"
+            >
+              <RefreshCw className="w-3 h-3" /> Retry Live API
+            </button>
+          )}
         </div>
       )}
 
@@ -1388,7 +1405,9 @@ export default function StagingDashboard() {
                 modelStatus.verified ? "Verified" : "UNVERIFIED"
               } (${modelStatus.sha256.slice(0, 12)}…)`
             : isDemoMode
-            ? "Offline Demo Fixtures (API Unreachable)"
+            ? IS_STATIC_PORTFOLIO
+              ? "Portfolio Static Showcase (Audited Q1 2024 Fixtures)"
+              : "Offline Demo Fixtures (API Unreachable)"
             : "Checking Model Governance…"}
         </div>
       </footer>
