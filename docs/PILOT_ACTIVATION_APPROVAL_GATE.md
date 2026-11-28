@@ -1,8 +1,8 @@
 # SensorGuard AI — Live Pilot Activation Approval Gate & Two-Stage Authorization
 
-**Current Operational Status:** **LOCKED / FAIL-CLOSED PENDING EXPLICIT OPERATOR APPROVAL**  
-**Stage 1 Readiness (One-Time Pre-Flight Station Availability Check, Max 16 HTTP Attempts):** **READY FOR EXPLICIT STAGE 1 AUTHORIZATION**  
-**Stage 2 Readiness (Recurring Shadow-Live Polling):** **NO-GO / HELD PENDING STAGE 1 RESULTS & SEPARATE APPROVAL**  
+**Current Operational Status:** **STAGE 1 EXECUTED ONCE (`1/8` ACTIVE); STAGE 2 RECURRING POLLING LOCKED (`opt_in_enabled = False`)**  
+**Stage 1 Readiness (One-Time Pre-Flight Station Availability Check, Max 16 HTTP Attempts):** **COMPLETED ONCE (`2026-11-27T06:49:34Z`) — Token `s1_85f032d67045433f` Consumed (`16/16` requests)**  
+**Stage 2 Readiness (Recurring Shadow-Live Polling):** **NO-GO / HELD PENDING SEPARATE STAGE 2 AUTHORIZATION & STATION SCOPE DECISION**  
 **Public Production / Adaptive SAGE Promotion:** **NO-GO (Static `SAGEForecaster` only)**
 
 ---
@@ -57,20 +57,22 @@ python -m sensorguard.cli authorize-stage1 \
 
 ---
 
-## 2. Target Station & PM2.5 Sensor Inventory (Offline `2026-11-22` Snapshot)
+## 2. Target Station Inventory & Verified Stage 1 Live Result (`2026-11-27T06:49:34Z`)
 
-All entries below reflect archived DB records with **zero external OpenAQ HTTP calls executed**:
+Archived evidence JSON: [`docs/audit/stage1_preflight_result.json`](audit/stage1_preflight_result.json) (`approval_id = s1_85f032d67045433f`, `execution_id = exec_d91ef7f6a583485a`, `attempts_consumed = 16 / 16`, `daily_quota_used_today = 16 / 48`, `recurring_polling_opt_in_enabled = false`).
 
-| Priority | Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Last Stored Meta UTC | Stage 1 Pre-Flight Action |
+| Station Name | OpenAQ Loc ID | OpenAQ PM2.5 Sensor ID | Upstream Feed | License | Stage 1 Metadata UTC | Stage 1 PM2.5 Hourly (48h) | Live Pre-Flight Status |
 |---|---|---|---|---|---|---|---:|
-| **Tier 1** | Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE ONCE** |
-| **Tier 1** | Bexley - Slade Green | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-22T11:00Z` | **VERIFY LIVE ONCE** |
-| **Tier 2** | London Harlington - UKA00472 | `141` | `261` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
-| **Tier 2** | London Hillingdon - UKA00266 | `153` | `1927060` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
-| **Tier 2** | Southampton Centre - UKA00235 | `698` | `1213` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
-| **Tier 2** | Wicken Fen - UKA00362 | `804` | `1999688` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
-| **Tier 2** | St Osyth - UKA00445 | `1795` | `1732639` | EEA | `ODC-BY` | `2026-05-26T12:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
-| **Tier 2** | Manchester Piccadilly - UKA00248 | `2312` | `5269` | EEA | `ODC-BY` | `2026-05-26T13:00Z` | **STALE AT SNAPSHOT — PROBE ONCE** |
+| **Bexley - Slade Green** | `157` | `254` | London Air Quality Network | `UK OGL` | `2026-11-27T05:00:00Z` | **`2026-11-25T11:00:00+00:00`** | **`active`** |
+| Westminster - Marylebone Road | `154` | `246` | London Air Quality Network | `UK OGL` | `2026-11-27T04:00:00Z` *(other pollutants)* | None within 48h | `inactive` |
+| London Harlington - UKA00472 | `141` | `261` | EEA | `ODC-BY` | `2026-05-26T13:00:00Z` | None within 48h | `inactive` |
+| London Hillingdon - UKA00266 | `153` | `1927060` | EEA | `ODC-BY` | `2026-05-26T13:00:00Z` | None within 48h | `inactive` |
+| Southampton Centre - UKA00235 | `698` | `1213` | EEA | `ODC-BY` | `2026-05-26T13:00:00Z` | None within 48h | `inactive` |
+| Wicken Fen - UKA00362 | `804` | `1999688` | EEA | `ODC-BY` | `2026-05-26T13:00:00Z` | None within 48h | `inactive` |
+| St Osyth - UKA00445 | `1795` | `1732639` | EEA | `ODC-BY` | `2026-05-26T12:00:00Z` | None within 48h | `inactive` |
+| Manchester Piccadilly - UKA00248 | `2312` | `5269` | EEA | `ODC-BY` | `2026-05-26T13:00:00Z` | None within 48h | `inactive` |
+
+**Stage 1 Finding:** Probing `/v3/sensors/{id}/hours` confirmed **only `1 / 8` pilot locations (`157` Bexley - Slade Green) returned live PM2.5 reports within the 48h window**; `154` (Marylebone Road) updated other station pollutants on `2026-11-27T04:00:00Z` while PM2.5 sensor `246` remained silent.
 
 ---
 
@@ -85,16 +87,16 @@ All entries below reflect archived DB records with **zero external OpenAQ HTTP c
 ## 4. Stage 2 Hold Criteria (Not Approved Today)
 
 Do **not** authorize Stage 2 recurring polling until:
-1. Stage 1 confirms live active feeds and restricts `BoundedPilotConfig.allowed_location_ids` solely to active sensors.
+1. Operator decides whether Stage 2 should monitor solely active location `(157,)` (degraded single-station neighbor mode, `1–2` req/run within `48 req/day`) or first discover replacement active neighboring UK PM2.5 stations, and wires a Stage 2 worker CLI entrypoint restricting `BoundedPilotConfig.allowed_location_ids` cleanly.
 2. `SENSORGUARD_SHADOW_ARTIFACT_DIR` is provisioned with verified `.json` shadow artifacts (`sensorguard.shadow_artifact.v1`) and prospective forecasts enforce post-commit completion proof (`commit_completed_at`, `min_lead_seconds >= 300s`, `commit_safety_margin_seconds >= 15s`).
 3. Minimum prospective duration (`>= 7` days / `>= 168h`; hard floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`) and practitioner usability study ([REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md)) pass before any model promotion.
 
 ---
 
-## 5. Formal Operator Sign-Off (Pending)
+## 5. Formal Operator Sign-Off Ledger
 
-- **Stage 1 Approval Wording (to authorize once):**  
+- **Stage 1 Approval Wording (Executed Once):**  
   `Approve one-time Stage 1 OpenAQ station availability pre-flight check (<= 16 HTTP attempts total, no recurring polling, no opt_in_enabled change) across locations (141, 153, 154, 157, 698, 804, 1795, 2312).`
-- **Stage 1 Status:** `NOT YET AUTHORIZED`
-- **Stage 2 Recurring Polling Status:** `NO-GO (HELD)`
-- **Operator Identity / UTC Timestamp:** `___________________________`
+- **Stage 1 Status:** `COMPLETED` (`approval_id = s1_85f032d67045433f`, `execution_id = exec_d91ef7f6a583485a`, `16/16` HTTP requests, `1/8` active: location `157` / sensor `254`; evidence archived in [`docs/audit/stage1_preflight_result.json`](audit/stage1_preflight_result.json))
+- **Stage 2 Recurring Polling Status:** `NO-GO (HELD — openaq_live_polling.opt_in_enabled = False)`
+- **Operator Identity / UTC Timestamp:** `Dinesh / 2026-11-27T06:49:34Z`
