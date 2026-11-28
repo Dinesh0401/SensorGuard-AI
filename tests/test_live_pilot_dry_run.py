@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -33,8 +34,10 @@ from sensorguard.api import (
     get_serving_model,
     invalidate_pilot_feature_cache,
 )
+from sensorguard.cli import main as cli_main
 from sensorguard.db.schema import (
     ForecastRecord,
+    ForecastRun,
     Observation,
     PilotApiRateLimit,
     PilotPollLease,
@@ -48,10 +51,12 @@ from sensorguard.pilot_monitor import (
     DurablePilotQuotaTracker,
     PilotQuotaTracker,
     run_bounded_opt_in_poll,
+    run_stage2_pilot_cycle,
     set_polling_kill_switch,
 )
 from sensorguard.shadow_eval import (
     generate_prospective_shadow_forecasts,
+    load_shadow_suite_from_dir,
     reconcile_shadow_evaluation,
 )
 
@@ -500,5 +505,121 @@ def test_full_live_pilot_dry_run_sequence(tmp_path: Path, monkeypatch: pytest.Mo
         finally:
             app.dependency_overrides.clear()
             invalidate_pilot_feature_cache()
+    finally:
+        engine.dispose()
+
+
+def test_stage2_shadow_manifest_and_pilot_cycle_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Verify build-shadow-artifacts CLI, tamper rejection, fail-closed pilot-cycle dry-run & 157 live mock."""
+    db_path = tmp_path / "stage2_cycle.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("SENSORGUARD_POLLING_KILL_SWITCH", "false")
+    monkeypatch.setenv("SENSORGUARD_ALLOW_IN_MEMORY_RATE_LIMIT_DEV", "false")
+
+    base_hr = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    t_base = base_hr - timedelta(hours=125)
+    engine, factory, _st1_id, _st2_id, _s1_id, _s2_id = _build_migrated_dry_run_db(
+        db_path, t_base=t_base, monkeypatch=monkeypatch, n_hours=120
+    )
+
+    try:
+        art_dir = tmp_path / "shadow_suite"
+        # 1. Build shadow JSON artifacts & shadow_manifest.json via CLI (0 network calls)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["sensorguard", "build-shadow-artifacts", "--output-dir", str(art_dir)],
+        )
+        cli_main()
+        build_out = json.loads(capsys.readouterr().out)
+        assert build_out["status"] == "SHADOW_ARTIFACTS_BUILT"
+        manifest_file = Path(build_out["manifest_path"])
+        assert manifest_file.exists()
+        assert len(build_out["models"]) == 5
+
+        # Reload & verify manifest + tamper fail-closed check
+        loaded = load_shadow_suite_from_dir(art_dir)
+        assert len(loaded["feature_columns"]) == build_out["feature_count"]
+        sage_path = Path(build_out["models"]["sage_static"]["artifact_path"])
+        orig_text = sage_path.read_text(encoding="utf-8")
+        sage_path.write_text(orig_text + " ", encoding="utf-8")
+        with pytest.raises(ValueError, match="SHA-256"):
+            load_shadow_suite_from_dir(art_dir)
+        sage_path.write_text(orig_text, encoding="utf-8")
+
+        # 2. Default pilot-cycle CLI runs zero-network dry-run targeting Stage 1 active 157
+        monkeypatch.setenv("SENSORGUARD_SHADOW_ARTIFACT_DIR", str(art_dir))
+        monkeypatch.setattr(sys, "argv", ["sensorguard", "pilot-cycle"])
+        cli_main()
+        dry_out = json.loads(capsys.readouterr().out)
+        assert dry_out["status"] == "DRY_RUN_READY"
+        assert dry_out["execute_poll"] is False
+        assert dry_out["allowed_location_ids"] == [157]
+        assert dry_out["artifacts_verified"] is True
+        assert dry_out["forecast_runs_created"] == 0
+        assert dry_out["recurring_polling_opt_in_enabled"] is False
+        assert dry_out["poll_result"]["http_attempts"] == 0
+
+        # 3. Even with execute_poll=True, locked DB PilotControlState halts fail-closed with 0 HTTP calls
+        calls = 0
+
+        def _count_and_serve(req: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            obs_ts = (base_hr - timedelta(minutes=60)).isoformat().replace("+00:00", "Z")
+            return httpx.Response(
+                200,
+                json={"results": [{"period": {"datetimeTo": {"utc": obs_ts}}, "value": 16.4}]},
+            )
+
+        blocked_cycle = run_stage2_pilot_cycle(
+            session_factory=factory,
+            execute_poll=True,
+            location_ids=(157,),
+            artifact_dir=art_dir,
+            api_key="dummy-stage2-key",
+            transport=httpx.MockTransport(_count_and_serve),
+            now_fn=lambda: datetime.now(UTC) + timedelta(seconds=60),
+        )
+        assert blocked_cycle["status"] == "SKIPPED_KILL_SWITCH"
+        assert calls == 0
+        assert blocked_cycle["forecast_runs_created"] == 0
+
+        # 4. After explicit operator unlock, single Stage 2 cycle polls sensor 254 (157) & writes verified forecasts
+        with factory() as unlock_s:
+            set_polling_kill_switch(
+                unlock_s,
+                kill_switch_active=False,
+                opt_in_enabled=True,
+                reason="Test operator unlock for Stage 2 cycle test",
+                updated_by="dinesh_ops_test",
+            )
+
+        cycle_now = datetime.now(UTC) + timedelta(seconds=60)
+        future_cutoff = cycle_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        res_ok = run_stage2_pilot_cycle(
+            session_factory=factory,
+            execute_poll=True,
+            location_ids=(157,),
+            artifact_dir=art_dir,
+            api_key="dummy-stage2-key",
+            transport=httpx.MockTransport(_count_and_serve),
+            decision_cutoff=future_cutoff,
+            now_fn=lambda: cycle_now,
+        )
+        assert res_ok["status"] == "COMPLETED"
+        assert calls == 1
+        assert res_ok["poll_result"]["http_attempts"] == 1
+        assert res_ok["forecast_runs_created"] == 5
+        assert res_ok["shadow_evaluation"]["truly_prospective_count"] == 5
+        assert res_ok["shadow_evaluation"]["commit_proof_violation_count"] == 0
+        with factory() as chk_s:
+            runs = list(
+                chk_s.scalars(select(ForecastRun).where(ForecastRun.decision_cutoff == future_cutoff)).all()
+            )
+            assert len(runs) == 5
+            assert all(r.commit_proof_status == "VERIFIED_PROSPECTIVE" for r in runs)
     finally:
         engine.dispose()

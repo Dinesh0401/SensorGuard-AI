@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONTROL_NAME = "openaq_live_polling"
 DEFAULT_LEASE_NAME = "openaq_hourly_poll"
+STAGE1_VERIFIED_ACTIVE_LOCATION_IDS: tuple[int, ...] = (157,)
 _ATTEMPT_LOCK = threading.Lock()
 
 
@@ -1125,3 +1127,162 @@ def reconcile_delayed_ground_truth(
         "mnar_censoring_warning": bool(missing_rate > 0.10 or delayed_count > 0),
         "config_note": asdict(BoundedPilotConfig()),
     }
+
+
+def run_stage2_pilot_cycle(
+    session_factory: sessionmaker[Session],
+    execute_poll: bool = False,
+    location_ids: tuple[int, ...] = STAGE1_VERIFIED_ACTIVE_LOCATION_IDS,
+    artifact_dir: str | Path | None = None,
+    max_requests_per_day: int = 48,
+    lookback_hours: int = 48,
+    min_lead_seconds: float = 300.0,
+    commit_safety_margin_seconds: float = 15.0,
+    decision_cutoff: datetime | None = None,
+    api_key: str | None = None,
+    transport: httpx.BaseTransport | None = None,
+    now_fn: Callable[[], datetime] | None = None,
+) -> dict[str, Any]:
+    """Orchestrate one bounded Stage 2 poll + truth reconciliation + prospective shadow forecast cycle.
+
+    Defaults strictly to dry-run (`execute_poll=False`) with zero external HTTP calls and zero
+    forecast DB writes. Even when `execute_poll=True`, outbound requests remain blocked unless
+    `PilotControlState('openaq_live_polling')` is unlocked and `SENSORGUARD_POLLING_KILL_SWITCH`
+    is disabled.
+    """
+    from sensorguard.api import invalidate_pilot_feature_cache
+    from sensorguard.shadow_eval import (
+        generate_prospective_shadow_forecasts,
+        load_shadow_suite_from_dir,
+        reconcile_shadow_evaluation,
+    )
+
+    now = _utc(now_fn()) if now_fn is not None else datetime.now(UTC)
+    if decision_cutoff is not None:
+        cutoff = _utc(decision_cutoff) or now.replace(minute=0, second=0, microsecond=0)
+    else:
+        safe_anchor = now + timedelta(seconds=float(min_lead_seconds) + float(commit_safety_margin_seconds))
+        cutoff = safe_anchor.replace(minute=0, second=0, microsecond=0)
+    target_time = cutoff + timedelta(hours=1)
+
+    poll_cfg = BoundedPilotConfig(
+        opt_in_enabled=bool(execute_poll),
+        allowed_location_ids=tuple(location_ids),
+        lookback_hours=int(lookback_hours),
+        max_requests_per_day=int(max_requests_per_day),
+    )
+    poll_res = run_bounded_opt_in_poll(
+        session_factory=session_factory,
+        config=poll_cfg,
+        api_key=api_key,
+        transport=transport,
+        now_utc=now,
+    )
+
+    try:
+        suite = load_shadow_suite_from_dir(artifact_dir, evaluation_time=now)
+        artifacts_ok = True
+        artifact_err = None
+        resolved_art_dir = suite["artifact_dir"]
+    except Exception as exc:  # noqa: BLE001
+        suite = None
+        artifacts_ok = False
+        artifact_err = str(exc)
+        resolved_art_dir = str(artifact_dir or os.getenv("SENSORGUARD_SHADOW_ARTIFACT_DIR") or "")
+
+    poll_status = str(poll_res.get("status", ""))
+    skipped_poll = poll_status in {
+        "SKIPPED_KILL_SWITCH",
+        "SKIPPED_OPT_OUT",
+        "SKIPPED_NO_CREDENTIALS",
+        "SKIPPED_NO_LEASE",
+    }
+
+    with session_factory() as sess:
+        ctrl = sess.scalars(
+            select(PilotControlState).where(PilotControlState.control_name == DEFAULT_CONTROL_NAME)
+        ).first()
+        recurring_opt_in = bool(ctrl.opt_in_enabled) if ctrl is not None else False
+        kill_switch = bool(ctrl.kill_switch_active) if ctrl is not None else True
+
+        if (not execute_poll) or skipped_poll:
+            truth_summary = reconcile_delayed_ground_truth(sess)
+            shadow_summary = reconcile_shadow_evaluation(sess, min_lead_seconds=min_lead_seconds)
+            if not execute_poll:
+                cycle_status = "DRY_RUN_READY" if artifacts_ok else "DRY_RUN_ARTIFACTS_UNVERIFIED"
+            else:
+                cycle_status = poll_status
+            return {
+                "status": cycle_status,
+                "execute_poll": bool(execute_poll),
+                "allowed_location_ids": list(location_ids),
+                "planned_decision_cutoff": cutoff.isoformat(),
+                "planned_target_time": target_time.isoformat(),
+                "kill_switch_active": kill_switch,
+                "recurring_polling_opt_in_enabled": recurring_opt_in,
+                "artifacts_verified": artifacts_ok,
+                "artifact_dir": resolved_art_dir,
+                "artifact_error": artifact_err,
+                "poll_result": poll_res,
+                "forecast_runs_created": 0,
+                "delayed_ground_truth": truth_summary,
+                "shadow_evaluation": shadow_summary,
+            }
+
+        if not artifacts_ok or suite is None:
+            truth_summary = reconcile_delayed_ground_truth(sess)
+            shadow_summary = reconcile_shadow_evaluation(sess, min_lead_seconds=min_lead_seconds)
+            return {
+                "status": "BLOCKED_SHADOW_ARTIFACTS_UNVERIFIED",
+                "execute_poll": True,
+                "allowed_location_ids": list(location_ids),
+                "planned_decision_cutoff": cutoff.isoformat(),
+                "planned_target_time": target_time.isoformat(),
+                "kill_switch_active": kill_switch,
+                "recurring_polling_opt_in_enabled": recurring_opt_in,
+                "artifacts_verified": False,
+                "artifact_dir": resolved_art_dir,
+                "artifact_error": artifact_err,
+                "poll_result": poll_res,
+                "forecast_runs_created": 0,
+                "delayed_ground_truth": truth_summary,
+                "shadow_evaluation": shadow_summary,
+            }
+
+        invalidate_pilot_feature_cache()
+        all_stations = list(sess.scalars(select(Station).order_by(Station.id.asc())).all())
+        coords = {str(st.id): (float(st.latitude), float(st.longitude)) for st in all_stations}
+        allow_set = set(location_ids)
+        target_station_ids = [st.id for st in all_stations if st.provider_location_id in allow_set]
+        if not target_station_ids:
+            raise ValueError(f"No configured DB stations match allowed_location_ids={list(location_ids)}.")
+
+        runs = generate_prospective_shadow_forecasts(
+            session=sess,
+            decision_cutoffs=[cutoff],
+            fitted_models=suite,
+            station_coords=coords,
+            station_ids=target_station_ids,
+            data_mode="shadow_live",
+            min_lead_seconds=min_lead_seconds,
+            commit_safety_margin_seconds=commit_safety_margin_seconds,
+            now_fn=now_fn,
+        )
+        truth_summary = reconcile_delayed_ground_truth(sess)
+        shadow_summary = reconcile_shadow_evaluation(sess, min_lead_seconds=min_lead_seconds)
+        return {
+            "status": "COMPLETED",
+            "execute_poll": True,
+            "allowed_location_ids": list(location_ids),
+            "planned_decision_cutoff": cutoff.isoformat(),
+            "planned_target_time": target_time.isoformat(),
+            "kill_switch_active": kill_switch,
+            "recurring_polling_opt_in_enabled": recurring_opt_in,
+            "artifacts_verified": True,
+            "artifact_dir": resolved_art_dir,
+            "artifact_error": None,
+            "poll_result": poll_res,
+            "forecast_runs_created": len(runs),
+            "delayed_ground_truth": truth_summary,
+            "shadow_evaluation": shadow_summary,
+        }
