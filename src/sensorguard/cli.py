@@ -13,6 +13,7 @@ from sensorguard.audit import audit_candidate_location
 from sensorguard.db.session import get_session_factory, init_db
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.ingest import IngestionPipeline
+from sensorguard.pilot_monitor import STAGE1_VERIFIED_ACTIVE_LOCATION_IDS, run_stage2_pilot_cycle
 from sensorguard.preflight import (
     STAGE1_HARD_MAX_ATTEMPTS,
     Stage1PreflightConfig,
@@ -22,6 +23,7 @@ from sensorguard.preflight import (
 )
 from sensorguard.providers import OpenAQClient
 from sensorguard.replay import PointInTimeReplayEngine
+from sensorguard.shadow_eval import build_and_save_shadow_suite
 from sensorguard.simulation import OutageConfig
 
 
@@ -201,6 +203,52 @@ def _run_authorize_stage1(args: argparse.Namespace) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
 
+def _run_build_shadow_artifacts(args: argparse.Namespace) -> None:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        suite = build_and_save_shadow_suite(
+            session=session,
+            artifact_dir=args.output_dir,
+            nominal_coverage=float(args.nominal_coverage),
+        )
+    summary = {
+        "status": "SHADOW_ARTIFACTS_BUILT",
+        "artifact_dir": suite["artifact_dir"],
+        "manifest_path": suite["manifest_path"],
+        "nominal_coverage": suite["nominal_coverage"],
+        "feature_count": len(suite["feature_columns"]),
+        "models": {
+            k: {
+                "artifact_path": v["artifact_path"],
+                "artifact_sha256": v["artifact_sha256"],
+                "artifact_immutable_ref": v["artifact_immutable_ref"],
+            }
+            for k, v in suite["model_provenance"].items()
+        },
+    }
+    print(json.dumps(summary, indent=2))
+
+
+def _run_pilot_cycle(args: argparse.Namespace) -> None:
+    loc_ids = tuple(int(x) for x in args.location_ids)
+    report = run_stage2_pilot_cycle(
+        session_factory=get_session_factory(),
+        execute_poll=bool(args.execute_poll),
+        location_ids=loc_ids,
+        artifact_dir=args.artifact_dir,
+        max_requests_per_day=int(args.daily_cap),
+        lookback_hours=int(args.lookback_hours),
+        min_lead_seconds=float(args.min_lead_seconds),
+    )
+    rendered = json.dumps(report, indent=2, default=str)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    if str(report.get("status", "")).startswith("BLOCKED_"):
+        sys.exit(2)
+
+
 def _load_local_env() -> None:
     """Load key-value pairs from local .env if present and not already set."""
     env_file = Path(".env")
@@ -333,6 +381,61 @@ def main() -> None:
         help="Explicitly allow resetting request budget during recovery (default carries over remaining attempts only)",
     )
     p_auth.set_defaults(func=_run_authorize_stage1)
+
+    # build-shadow-artifacts (0-network local JSON artifact + manifest generator for Stage 2)
+    p_build_shadow = subparsers.add_parser(
+        "build-shadow-artifacts",
+        help="Fit and serialize verified sensorguard.shadow_artifact.v1 JSON shadow models and manifest",
+    )
+    p_build_shadow.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("artifacts/shadow_suite"),
+        help="Target directory for shadow JSON files and shadow_manifest.json (default artifacts/shadow_suite)",
+    )
+    p_build_shadow.add_argument(
+        "--nominal-coverage",
+        type=float,
+        default=0.90,
+        help="Nominal conformal prediction coverage target (default 0.90)",
+    )
+    p_build_shadow.set_defaults(func=_run_build_shadow_artifacts)
+
+    # pilot-cycle (Stage 2 bounded poll + prospective shadow cycle; strictly dry-run default)
+    p_pilot = subparsers.add_parser(
+        "pilot-cycle",
+        help="Run Stage 2 bounded poll and prospective shadow cycle (defaults strictly to dry-run)",
+    )
+    p_pilot.add_argument(
+        "--execute-poll",
+        action="store_true",
+        help="Attempt bounded OpenAQ poll if DB PilotControlState & env kill switch permit (default dry-run)",
+    )
+    p_pilot.add_argument(
+        "--location-ids",
+        type=int,
+        nargs="+",
+        default=list(STAGE1_VERIFIED_ACTIVE_LOCATION_IDS),
+        help="Provider location IDs to scope Stage 2 polling (default Stage 1 verified active: 157)",
+    )
+    p_pilot.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=None,
+        help="Directory holding shadow_manifest.json (defaults to SENSORGUARD_SHADOW_ARTIFACT_DIR)",
+    )
+    p_pilot.add_argument("--daily-cap", type=int, default=48, help="Daily OpenAQ request cap (default 48)")
+    p_pilot.add_argument(
+        "--lookback-hours", type=int, default=48, help="OpenAQ reconciliation lookback hours"
+    )
+    p_pilot.add_argument(
+        "--min-lead-seconds",
+        type=float,
+        default=300.0,
+        help="Minimum prospective commit completion lead time in seconds (default 300)",
+    )
+    p_pilot.add_argument("--output", type=Path, default=None, help="Optional JSON summary output path")
+    p_pilot.set_defaults(func=_run_pilot_cycle)
 
     args = parser.parse_args()
     args.func(args)
