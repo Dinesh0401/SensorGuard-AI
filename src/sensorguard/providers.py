@@ -12,7 +12,7 @@ import logging
 import os
 import random
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +22,10 @@ import httpx
 logger = logging.getLogger(__name__)
 
 OPENAQ_API_BASE = "https://api.openaq.org"
+
+
+class QuotaExhaustedError(RuntimeError):
+    """Raised before issuing an outbound HTTP attempt when durable API quota is exhausted."""
 
 
 class RateLimiter:
@@ -94,6 +98,7 @@ class OpenAQClient:
         max_retries: int = 3,
         base_backoff_seconds: float = 0.5,
         max_backoff_seconds: float = 10.0,
+        attempt_guard: Callable[[str, str, int], None] | None = None,
     ) -> None:
         """Initialize the client.
 
@@ -106,6 +111,7 @@ class OpenAQClient:
             max_retries: Maximum number of retry attempts for retryable errors.
             base_backoff_seconds: Initial backoff duration in seconds.
             max_backoff_seconds: Upper cap on backoff duration.
+            attempt_guard: Optional callback executed before EVERY HTTP attempt (including retries).
         """
         resolved_key = api_key or os.getenv("OPENAQ_API_KEY")
         if not resolved_key:
@@ -117,6 +123,10 @@ class OpenAQClient:
         self.max_retries = max_retries
         self.base_backoff = base_backoff_seconds
         self.max_backoff = max_backoff_seconds
+        self._attempt_guard = attempt_guard
+        self.total_http_attempts = 0
+        self.retry_attempts = 0
+        self.failed_attempts = 0
         self._rate_limiter = RateLimiter(rate=rate_limit_per_second, capacity=5.0)
 
     def _headers(self) -> dict[str, str]:
@@ -138,6 +148,11 @@ class OpenAQClient:
 
         for attempt in range(self.max_retries + 1):
             self._rate_limiter.acquire()
+            if self._attempt_guard is not None:
+                self._attempt_guard(method, endpoint, attempt)
+            self.total_http_attempts += 1
+            if attempt > 0:
+                self.retry_attempts += 1
             try:
                 with httpx.Client(
                     base_url=self.base_url, timeout=self.timeout, transport=self._transport
@@ -150,6 +165,7 @@ class OpenAQClient:
                     )
 
                 if response.status_code == 429:
+                    self.failed_attempts += 1
                     retry_after = response.headers.get("Retry-After")
                     delay = (
                         float(retry_after)
@@ -163,12 +179,15 @@ class OpenAQClient:
                     response.raise_for_status()
 
                 if response.status_code in {500, 502, 503, 504}:
+                    self.failed_attempts += 1
                     delay = min(self.max_backoff, self.base_backoff * (2**attempt)) + random.uniform(0.1, 0.5)
                     if attempt < self.max_retries:
                         time.sleep(delay)
                         continue
                     response.raise_for_status()
 
+                if response.status_code >= 400:
+                    self.failed_attempts += 1
                 response.raise_for_status()
                 # Record receipt timestamp when bytes have successfully arrived over the network:
                 fetched_at = datetime.now(UTC)
@@ -179,6 +198,7 @@ class OpenAQClient:
                 payload = response.json()
 
                 if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+                    self.failed_attempts += 1
                     raise TypeError("unexpected OpenAQ response schema")
 
                 return ApiResponse(
@@ -190,6 +210,7 @@ class OpenAQClient:
                 )
 
             except (httpx.TimeoutException, httpx.NetworkError) as err:
+                self.failed_attempts += 1
                 last_exception = err
                 if attempt < self.max_retries:
                     delay = min(self.max_backoff, self.base_backoff * (2**attempt)) + random.uniform(0.1, 0.5)

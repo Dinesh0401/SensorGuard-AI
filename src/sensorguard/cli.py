@@ -13,8 +13,17 @@ from sensorguard.audit import audit_candidate_location
 from sensorguard.db.session import get_session_factory, init_db
 from sensorguard.experiment import ExperimentConfig, run_experiment
 from sensorguard.ingest import IngestionPipeline
+from sensorguard.pilot_monitor import STAGE1_VERIFIED_ACTIVE_LOCATION_IDS, run_stage2_pilot_cycle
+from sensorguard.preflight import (
+    STAGE1_HARD_MAX_ATTEMPTS,
+    Stage1PreflightConfig,
+    authorize_stage1_preflight_db,
+    authorize_stage1_recovery_db,
+    run_stage1_preflight,
+)
 from sensorguard.providers import OpenAQClient
 from sensorguard.replay import PointInTimeReplayEngine
+from sensorguard.shadow_eval import build_and_save_shadow_suite
 from sensorguard.simulation import OutageConfig
 
 
@@ -107,6 +116,139 @@ def _run_replay(args: argparse.Namespace) -> None:
             print(df[["sensor_id", "observed_at", "value", "unit", "quality_flag"]].tail(10).to_string())
 
 
+def _run_preflight_stations(args: argparse.Namespace) -> None:
+    if not 1 <= int(args.max_attempts) <= STAGE1_HARD_MAX_ATTEMPTS:
+        print(
+            json.dumps(
+                {
+                    "status": "INVALID_ARGUMENTS",
+                    "error": f"--max-attempts must be between 1 and {STAGE1_HARD_MAX_ATTEMPTS}.",
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    cfg = Stage1PreflightConfig(
+        execute_once=bool(args.execute_once),
+        approval_id=args.approval_id,
+        max_attempts=int(args.max_attempts),
+        max_daily_quota=int(args.daily_cap),
+        recent_hours=float(args.recent_hours),
+        authorized_by=args.authorized_by,
+        output_path=args.output,
+        write_artifact=not bool(args.no_artifact),
+    )
+    report = run_stage1_preflight(get_session_factory(), config=cfg)
+    print(json.dumps(report, indent=2, default=str))
+    if str(report.get("status", "")).startswith(("BLOCKED_", "ABORTED_")):
+        sys.exit(2)
+
+
+def _run_authorize_stage1(args: argparse.Namespace) -> None:
+    if not args.confirm_single_use:
+        print(
+            json.dumps(
+                {
+                    "status": "INVALID_ARGUMENTS",
+                    "error": "--confirm-single-use is required to issue a single-use Stage 1 approval token.",
+                },
+                indent=2,
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        try:
+            if args.recover_from_approval_id:
+                row = authorize_stage1_recovery_db(
+                    session,
+                    prior_approval_id=args.recover_from_approval_id,
+                    authorized_by=args.authorized_by,
+                    reason=args.reason,
+                    max_attempts=args.max_attempts,
+                    allow_budget_reset=bool(args.allow_budget_reset),
+                )
+            else:
+                row = authorize_stage1_preflight_db(
+                    session,
+                    authorized_by=args.authorized_by,
+                    reason=args.reason
+                    or "Explicit single-use Stage 1 station availability check authorization",
+                    max_attempts=args.max_attempts or STAGE1_HARD_MAX_ATTEMPTS,
+                )
+            session.commit()
+        except ValueError as exc:
+            session.rollback()
+            print(
+                json.dumps({"status": "AUTHORIZATION_REJECTED", "error": str(exc)}, indent=2), file=sys.stderr
+            )
+            sys.exit(2)
+        payload = {
+            "status": row.status,
+            "approval_id": row.approval_id,
+            "authorized_by": row.authorized_by,
+            "reason": row.reason,
+            "max_attempts": row.max_attempts,
+            "remaining_attempts": int(row.max_attempts) - int(row.attempts_consumed),
+            "recovered_from_approval_id": row.recovered_from_approval_id,
+            "single_use": True,
+            "next_command": (
+                f"python -m sensorguard.cli preflight-stations --execute-once "
+                f"--approval-id {row.approval_id} --authorized-by {row.authorized_by}"
+            ),
+        }
+    print(json.dumps(payload, indent=2, default=str))
+
+
+def _run_build_shadow_artifacts(args: argparse.Namespace) -> None:
+    session_factory = get_session_factory()
+    with session_factory() as session:
+        suite = build_and_save_shadow_suite(
+            session=session,
+            artifact_dir=args.output_dir,
+            nominal_coverage=float(args.nominal_coverage),
+        )
+    summary = {
+        "status": "SHADOW_ARTIFACTS_BUILT",
+        "artifact_dir": suite["artifact_dir"],
+        "manifest_path": suite["manifest_path"],
+        "nominal_coverage": suite["nominal_coverage"],
+        "feature_count": len(suite["feature_columns"]),
+        "models": {
+            k: {
+                "artifact_path": v["artifact_path"],
+                "artifact_sha256": v["artifact_sha256"],
+                "artifact_immutable_ref": v["artifact_immutable_ref"],
+            }
+            for k, v in suite["model_provenance"].items()
+        },
+    }
+    print(json.dumps(summary, indent=2))
+
+
+def _run_pilot_cycle(args: argparse.Namespace) -> None:
+    loc_ids = tuple(int(x) for x in args.location_ids)
+    report = run_stage2_pilot_cycle(
+        session_factory=get_session_factory(),
+        execute_poll=bool(args.execute_poll),
+        location_ids=loc_ids,
+        artifact_dir=args.artifact_dir,
+        max_requests_per_day=int(args.daily_cap),
+        lookback_hours=int(args.lookback_hours),
+        min_lead_seconds=float(args.min_lead_seconds),
+    )
+    rendered = json.dumps(report, indent=2, default=str)
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
+    if str(report.get("status", "")).startswith("BLOCKED_"):
+        sys.exit(2)
+
+
 def _load_local_env() -> None:
     """Load key-value pairs from local .env if present and not already set."""
     env_file = Path(".env")
@@ -160,6 +302,140 @@ def main() -> None:
     p_replay.add_argument("--mode", choices=["prospective", "retrospective"], default="prospective")
     p_replay.add_argument("--delay-hours", type=float, default=1.0)
     p_replay.set_defaults(func=_run_replay)
+
+    # preflight-stations (Stage 1 strictly bounded one-time availability check)
+    p_preflight = subparsers.add_parser(
+        "preflight-stations",
+        help="Stage 1 one-time bounded availability check for the 8 archived UK OpenAQ locations (dry-run default)",
+    )
+    p_preflight.add_argument(
+        "--execute-once",
+        action="store_true",
+        help="Actually issue bounded Stage 1 OpenAQ HTTP requests (default is 0-network dry-run)",
+    )
+    p_preflight.add_argument(
+        "--approval-id",
+        type=str,
+        default=None,
+        help="Single-use DB authorization token minted via authorize-stage1 (required for --execute-once)",
+    )
+    p_preflight.add_argument(
+        "--max-attempts",
+        type=int,
+        default=STAGE1_HARD_MAX_ATTEMPTS,
+        help="Hard cap on total HTTP attempts including retries (1..16, default 16)",
+    )
+    p_preflight.add_argument("--daily-cap", type=int, default=48, help="Daily OpenAQ quota cap (default 48)")
+    p_preflight.add_argument(
+        "--recent-hours",
+        type=float,
+        default=48.0,
+        help="Recency window in hours for active PM2.5 confirmation (default 48)",
+    )
+    p_preflight.add_argument(
+        "--authorized-by",
+        type=str,
+        default=None,
+        help="Non-default operator identity authorizing Stage 1 execution",
+    )
+    p_preflight.add_argument("--output", type=Path, default=None, help="Optional JSON artifact output path")
+    p_preflight.add_argument(
+        "--no-artifact",
+        action="store_true",
+        help="Do not write JSON report artifact to disk",
+    )
+    p_preflight.set_defaults(func=_run_preflight_stations)
+
+    # authorize-stage1 (mint single-use DB approval token; never makes HTTP calls or enables Stage 2)
+    p_auth = subparsers.add_parser(
+        "authorize-stage1",
+        help="Issue an explicit single-use DB approval token for one Stage 1 preflight execution",
+    )
+    p_auth.add_argument("--authorized-by", type=str, required=True, help="Non-default operator identity")
+    p_auth.add_argument(
+        "--reason",
+        type=str,
+        default="Explicit single-use Stage 1 station availability check authorization",
+        help="Audit reason recorded in stage1_preflight_authorizations",
+    )
+    p_auth.add_argument(
+        "--max-attempts",
+        type=int,
+        default=None,
+        help="Hard HTTP attempt budget for this token (1..16; defaults to remaining budget on recovery or 16)",
+    )
+    p_auth.add_argument(
+        "--confirm-single-use",
+        action="store_true",
+        help="Required confirmation flag acknowledging single-use approval semantics",
+    )
+    p_auth.add_argument(
+        "--recover-from-approval-id",
+        type=str,
+        default=None,
+        help="Optional prior FAILED_INCOMPLETE / CLAIMED_IN_PROGRESS approval ID to supersede via audited recovery",
+    )
+    p_auth.add_argument(
+        "--allow-budget-reset",
+        action="store_true",
+        help="Explicitly allow resetting request budget during recovery (default carries over remaining attempts only)",
+    )
+    p_auth.set_defaults(func=_run_authorize_stage1)
+
+    # build-shadow-artifacts (0-network local JSON artifact + manifest generator for Stage 2)
+    p_build_shadow = subparsers.add_parser(
+        "build-shadow-artifacts",
+        help="Fit and serialize verified sensorguard.shadow_artifact.v1 JSON shadow models and manifest",
+    )
+    p_build_shadow.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("artifacts/shadow_suite"),
+        help="Target directory for shadow JSON files and shadow_manifest.json (default artifacts/shadow_suite)",
+    )
+    p_build_shadow.add_argument(
+        "--nominal-coverage",
+        type=float,
+        default=0.90,
+        help="Nominal conformal prediction coverage target (default 0.90)",
+    )
+    p_build_shadow.set_defaults(func=_run_build_shadow_artifacts)
+
+    # pilot-cycle (Stage 2 bounded poll + prospective shadow cycle; strictly dry-run default)
+    p_pilot = subparsers.add_parser(
+        "pilot-cycle",
+        help="Run Stage 2 bounded poll and prospective shadow cycle (defaults strictly to dry-run)",
+    )
+    p_pilot.add_argument(
+        "--execute-poll",
+        action="store_true",
+        help="Attempt bounded OpenAQ poll if DB PilotControlState & env kill switch permit (default dry-run)",
+    )
+    p_pilot.add_argument(
+        "--location-ids",
+        type=int,
+        nargs="+",
+        default=list(STAGE1_VERIFIED_ACTIVE_LOCATION_IDS),
+        help="Provider location IDs to scope Stage 2 polling (default Stage 1 verified active: 157)",
+    )
+    p_pilot.add_argument(
+        "--artifact-dir",
+        type=Path,
+        default=None,
+        help="Directory holding shadow_manifest.json (defaults to SENSORGUARD_SHADOW_ARTIFACT_DIR)",
+    )
+    p_pilot.add_argument("--daily-cap", type=int, default=48, help="Daily OpenAQ request cap (default 48)")
+    p_pilot.add_argument(
+        "--lookback-hours", type=int, default=48, help="OpenAQ reconciliation lookback hours"
+    )
+    p_pilot.add_argument(
+        "--min-lead-seconds",
+        type=float,
+        default=300.0,
+        help="Minimum prospective commit completion lead time in seconds (default 300)",
+    )
+    p_pilot.add_argument("--output", type=Path, default=None, help="Optional JSON summary output path")
+    p_pilot.set_defaults(func=_run_pilot_cycle)
 
     args = parser.parse_args()
     args.func(args)

@@ -1,0 +1,53 @@
+{
+  "fixture_file": "sensorguard_pilot_fixture.sql.gz",
+  "compressed_bytes": 842743,
+  "compressed_sha256": "11e9d49a67cdf94cf8b322f4133165f3d63582cde8b6aafd8e0be1af1418180c",
+  "decompressed_sql_sha256": "c56a14d865933a9264091f9e050e1246a90aebf60001cad89099e038835aceac",
+  "alembic_head": "005_persistent_forecasts",
+  "observation_window_utc": {
+    "start": "2024-01-01T01:00:00Z",
+    "end": "2024-03-31T23:00:00Z",
+    "ingestion_fetched_range_utc": [
+      "2026-11-22T12:52:48Z",
+      "2026-11-22T12:54:04Z"
+    ]
+  },
+  "data_provenance_and_redistribution": {
+    "upstream_aggregator": "OpenAQ v3 API (/v3/sensors/{id}/hours)",
+    "source_networks": [
+      {
+        "provider_id": 70,
+        "provider_name": "European Environment Agency (EEA) / UK Defra AURN",
+        "station_provider_location_ids": [141, 153, 698, 804, 1795, 2312],
+        "license": "ODC-BY (Open Data Commons Attribution License)",
+        "redistribution_permitted_with_attribution": true
+      },
+      {
+        "provider_id": 205,
+        "provider_name": "London Air Quality Network (LAQN) / UK Defra",
+        "station_provider_location_ids": [154, 157],
+        "license": "UK Open Government Licence v3.0 (UK OGL)",
+        "redistribution_permitted_with_attribution": true
+      }
+    ],
+    "attribution_statement": "Contains UK AURN and LAQN hourly PM2.5 environmental monitoring data accessed via OpenAQ v3, redistributed under UK Open Government Licence v3.0 and Open Data Commons Attribution License (ODC-BY)."
+  },
+  "security_and_raw_payload_audit": {
+    "raw_ingest_batches_count": 17,
+    "raw_bytes_verified_match_response_hash": true,
+    "payload_content_type": "Pure OpenAQ JSON API response bodies (meta + results arrays only); no HTTP headers, cookies, URL tokens, or API keys stored",
+    "secret_scan_hits": 0
+  },
+  "expected_restored_contents": {
+    "stations_count": 8,
+    "sensors_count": 38,
+    "raw_ingest_batches_count": 17,
+    "observations_count": 14556,
+    "expected_provider_location_ids": [141, 153, 154, 157, 698, 804, 1795, 2312],
+    "pm25_min": 0.6,
+    "pm25_max": 119.0,
+    "pm25_mean": 8.086823,
+    "max_future_observation_leak_count": 0,
+    "max_invalid_quality_flag_count": 0
+  }
+}

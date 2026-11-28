@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Run automated network feasibility audit for candidate pilot monitoring network.
 
 Audits candidate stations for sensor coverage, temporal completeness, gap rates,

@@ -302,3 +302,23 @@ def test_forecast_feature_snapshot_provenance(test_db_session: Session):
     assert persisted is not None
     assert persisted.feature_hash == snapshot.feature_hash
     assert "14.5" in persisted.features_json
+
+
+def test_postgres_engine_pool_configuration(monkeypatch):
+    """Verify PostgreSQL engine creation configures production pooling parameters."""
+    from sensorguard.db import session as session_mod
+
+    captured: dict = {}
+
+    def fake_create_engine(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return "mock-pg-engine"
+
+    monkeypatch.setattr(session_mod, "create_engine", fake_create_engine)
+    eng = session_mod.create_db_engine("postgresql+psycopg2://user:pass@db:5432/sensorguard")
+    assert eng == "mock-pg-engine"
+    assert captured["kwargs"]["pool_size"] == 20
+    assert captured["kwargs"]["max_overflow"] == 10
+    assert captured["kwargs"]["pool_recycle"] == 1800
+    assert captured["kwargs"]["pool_pre_ping"] is True

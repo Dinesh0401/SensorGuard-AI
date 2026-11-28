@@ -278,35 +278,23 @@ class IngestionPipeline:
 
         return station, registered_sensors
 
-    def ingest_sensor_hours(
+    def persist_fetched_responses(
         self,
         sensor_db_id: int,
         provider_sensor_id: int,
-        client: OpenAQClient,
+        responses: list[Any],
         datetime_from: str | None = None,
         datetime_to: str | None = None,
-        max_pages: int = 5,
-        page_size: int = 100,
+        auto_commit: bool = True,
     ) -> IngestResult:
-        """Fetch and persist hourly observations for a sensor with versioned revisions.
-
-        Preserves verifiable raw HTTP response text and implements append-only
-        versioning for later revised/corrected measurements.
-        """
+        """Persist pre-fetched OpenAQ ApiResponse pages without performing network I/O inside DB locks."""
         result = IngestResult()
 
-        for resp in client.paginate_sensor_hours(
-            sensor_id=provider_sensor_id,
-            datetime_from=datetime_from,
-            datetime_to=datetime_to,
-            page_size=page_size,
-            max_pages=max_pages,
-        ):
+        for resp in responses:
             results = resp.payload.get("results", [])
             result.records_fetched += len(results)
 
             now_utc = datetime.now(UTC)
-            # Store immutable raw batch preserving exact response text, bytes, and cryptographic hash
             raw_bytes = (
                 resp.raw_bytes
                 if (hasattr(resp, "raw_bytes") and resp.raw_bytes)
@@ -342,7 +330,6 @@ class IngestionPipeline:
                 if val.quality_flag != "VALID":
                     result.records_invalid += 1
 
-                # Validation of inconsistent timestamps: observation cannot be in the future relative to fetch
                 if val.observed_at > resp.fetched_at:
                     val_flag = "FUTURE_TIMESTAMP_INCONSISTENCY"
                     val_status = "INVALID"
@@ -351,7 +338,6 @@ class IngestionPipeline:
                     val_flag = val.quality_flag
                     val_status = val.source_status
 
-                # Check existing observations for this sensor_id and observed_at (order by version desc)
                 obs_stmt = (
                     select(Observation)
                     .where(
@@ -363,7 +349,6 @@ class IngestionPipeline:
                 latest_existing = self.session.scalars(obs_stmt).first()
 
                 if latest_existing is None:
-                    # Initial observation: version 1
                     obs = Observation(
                         sensor_id=sensor_db_id,
                         raw_batch_id=raw_batch.id,
@@ -382,7 +367,6 @@ class IngestionPipeline:
                     self.session.add(obs)
                     result.records_inserted += 1
                 else:
-                    # Check if identical measurement or revised correction
                     same_val = (latest_existing.value == val.value) or (
                         latest_existing.value is None and val.value is None
                     )
@@ -390,10 +374,8 @@ class IngestionPipeline:
                         latest_existing.quality_flag == val_flag
                     )
                     if same_val and same_status:
-                        # Identical measurement: deduplicate
                         result.records_deduplicated += 1
                     else:
-                        # Revised/corrected measurement: append with incremented version
                         new_version = latest_existing.version + 1
                         obs = Observation(
                             sensor_id=sensor_db_id,
@@ -413,5 +395,42 @@ class IngestionPipeline:
                         self.session.add(obs)
                         result.records_revised += 1
 
-        self.session.commit()
+        if auto_commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         return result
+
+    def ingest_sensor_hours(
+        self,
+        sensor_db_id: int,
+        provider_sensor_id: int,
+        client: OpenAQClient,
+        datetime_from: str | None = None,
+        datetime_to: str | None = None,
+        max_pages: int = 5,
+        page_size: int = 100,
+        auto_commit: bool = True,
+    ) -> IngestResult:
+        """Fetch and persist hourly observations for a sensor with versioned revisions.
+
+        Fetches HTTP pages cleanly before starting DB writes to prevent holding write locks
+        across network requests.
+        """
+        responses = list(
+            client.paginate_sensor_hours(
+                sensor_id=provider_sensor_id,
+                datetime_from=datetime_from,
+                datetime_to=datetime_to,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+        )
+        return self.persist_fetched_responses(
+            sensor_db_id=sensor_db_id,
+            provider_sensor_id=provider_sensor_id,
+            responses=responses,
+            datetime_from=datetime_from,
+            datetime_to=datetime_to,
+            auto_commit=auto_commit,
+        )

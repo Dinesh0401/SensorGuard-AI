@@ -23,15 +23,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.6,<1"]
+dev = ["anyio>=4.0", "pytest>=8,<10", "ruff>=0.6,<1"]
+postgres = ["psycopg2-binary>=2.9,<3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src", "."]
 
 [tool.ruff]
 line-length = 110
 target-version = "py311"
 exclude = [".venv", "scratch"]
+
+[tool.ruff.lint]
+ignore = ["EXE", "B008"]

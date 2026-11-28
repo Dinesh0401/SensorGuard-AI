@@ -1,0 +1,261 @@
+{
+  "timestamp": "2026-11-25T11:57:24.004527+00:00",
+  "base_url": "http://127.0.0.1:8022",
+  "requests_per_tier": 100,
+  "concurrency_levels": [
+    1,
+    5,
+    10,
+    20
+  ],
+  "endpoints": {
+    "/health": {
+      "label": "Health Liveness & DB Check",
+      "path": "/health",
+      "tiers": {
+        "1": {
+          "concurrency": 1,
+          "total_requests": 100,
+          "wall_duration_seconds": 1.046,
+          "throughput_req_per_sec": 95.58,
+          "error_rate": 0.0,
+          "p50_ms": 10.24,
+          "p90_ms": 11.34,
+          "p95_ms": 11.62,
+          "p99_ms": 12.65,
+          "mean_ms": 10.42,
+          "min_ms": 9.54,
+          "max_ms": 12.76
+        },
+        "5": {
+          "concurrency": 5,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.485,
+          "throughput_req_per_sec": 206.36,
+          "error_rate": 0.0,
+          "p50_ms": 19.22,
+          "p90_ms": 29.96,
+          "p95_ms": 37.98,
+          "p99_ms": 109.63,
+          "mean_ms": 23.33,
+          "min_ms": 10.85,
+          "max_ms": 120.19
+        },
+        "10": {
+          "concurrency": 10,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.716,
+          "throughput_req_per_sec": 139.7,
+          "error_rate": 0.0,
+          "p50_ms": 54.66,
+          "p90_ms": 119.63,
+          "p95_ms": 173.59,
+          "p99_ms": 197.04,
+          "mean_ms": 67.18,
+          "min_ms": 23.17,
+          "max_ms": 225.82
+        },
+        "20": {
+          "concurrency": 20,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.742,
+          "throughput_req_per_sec": 134.83,
+          "error_rate": 0.0,
+          "p50_ms": 104.42,
+          "p90_ms": 258.77,
+          "p95_ms": 319.37,
+          "p99_ms": 449.53,
+          "mean_ms": 133.9,
+          "min_ms": 35.03,
+          "max_ms": 455.49
+        }
+      }
+    },
+    "/api/v1/stations": {
+      "label": "Station Catalog & Metadata",
+      "path": "/api/v1/stations",
+      "tiers": {
+        "1": {
+          "concurrency": 1,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.855,
+          "throughput_req_per_sec": 116.98,
+          "error_rate": 0.0,
+          "p50_ms": 8.34,
+          "p90_ms": 9.24,
+          "p95_ms": 10.78,
+          "p99_ms": 11.51,
+          "mean_ms": 8.51,
+          "min_ms": 7.53,
+          "max_ms": 11.54
+        },
+        "5": {
+          "concurrency": 5,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.461,
+          "throughput_req_per_sec": 216.94,
+          "error_rate": 0.0,
+          "p50_ms": 20.21,
+          "p90_ms": 27.63,
+          "p95_ms": 28.8,
+          "p99_ms": 46.41,
+          "mean_ms": 21.83,
+          "min_ms": 15.21,
+          "max_ms": 59.97
+        },
+        "10": {
+          "concurrency": 10,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.702,
+          "throughput_req_per_sec": 142.51,
+          "error_rate": 0.0,
+          "p50_ms": 54.83,
+          "p90_ms": 86.2,
+          "p95_ms": 190.63,
+          "p99_ms": 234.4,
+          "mean_ms": 65.44,
+          "min_ms": 29.12,
+          "max_ms": 299.52
+        },
+        "20": {
+          "concurrency": 20,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.774,
+          "throughput_req_per_sec": 129.26,
+          "error_rate": 0.0,
+          "p50_ms": 115.62,
+          "p90_ms": 270.53,
+          "p95_ms": 341.26,
+          "p99_ms": 448.59,
+          "mean_ms": 140.23,
+          "min_ms": 37.25,
+          "max_ms": 571.59
+        }
+      }
+    },
+    "/api/v1/stations/1/observations": {
+      "label": "Observations Time Series",
+      "path": "/api/v1/stations/1/observations",
+      "tiers": {
+        "1": {
+          "concurrency": 1,
+          "total_requests": 100,
+          "wall_duration_seconds": 1.705,
+          "throughput_req_per_sec": 58.66,
+          "error_rate": 0.0,
+          "p50_ms": 16.69,
+          "p90_ms": 18.0,
+          "p95_ms": 19.93,
+          "p99_ms": 23.29,
+          "mean_ms": 17.01,
+          "min_ms": 14.84,
+          "max_ms": 32.11
+        },
+        "5": {
+          "concurrency": 5,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.846,
+          "throughput_req_per_sec": 118.14,
+          "error_rate": 0.0,
+          "p50_ms": 40.97,
+          "p90_ms": 48.25,
+          "p95_ms": 50.02,
+          "p99_ms": 52.86,
+          "mean_ms": 41.18,
+          "min_ms": 29.89,
+          "max_ms": 55.09
+        },
+        "10": {
+          "concurrency": 10,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.837,
+          "throughput_req_per_sec": 119.41,
+          "error_rate": 0.0,
+          "p50_ms": 77.85,
+          "p90_ms": 92.08,
+          "p95_ms": 110.11,
+          "p99_ms": 151.27,
+          "mean_ms": 80.91,
+          "min_ms": 41.73,
+          "max_ms": 215.24
+        },
+        "20": {
+          "concurrency": 20,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.998,
+          "throughput_req_per_sec": 100.16,
+          "error_rate": 0.0,
+          "p50_ms": 156.22,
+          "p90_ms": 320.58,
+          "p95_ms": 419.94,
+          "p99_ms": 490.29,
+          "mean_ms": 185.44,
+          "min_ms": 58.31,
+          "max_ms": 512.25
+        }
+      }
+    },
+    "/api/v1/stations/1/forecasts": {
+      "label": "SAGE Guarded Forecasts",
+      "path": "/api/v1/stations/1/forecasts",
+      "tiers": {
+        "1": {
+          "concurrency": 1,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.736,
+          "throughput_req_per_sec": 135.83,
+          "error_rate": 0.0,
+          "p50_ms": 7.36,
+          "p90_ms": 7.91,
+          "p95_ms": 8.16,
+          "p99_ms": 8.7,
+          "mean_ms": 7.33,
+          "min_ms": 6.39,
+          "max_ms": 10.27
+        },
+        "5": {
+          "concurrency": 5,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.757,
+          "throughput_req_per_sec": 132.03,
+          "error_rate": 0.0,
+          "p50_ms": 28.18,
+          "p90_ms": 35.96,
+          "p95_ms": 37.23,
+          "p99_ms": 57.51,
+          "mean_ms": 35.9,
+          "min_ms": 18.45,
+          "max_ms": 752.16
+        },
+        "10": {
+          "concurrency": 10,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.9,
+          "throughput_req_per_sec": 111.07,
+          "error_rate": 0.0,
+          "p50_ms": 65.46,
+          "p90_ms": 150.13,
+          "p95_ms": 205.17,
+          "p99_ms": 243.13,
+          "mean_ms": 84.21,
+          "min_ms": 26.52,
+          "max_ms": 312.96
+        },
+        "20": {
+          "concurrency": 20,
+          "total_requests": 100,
+          "wall_duration_seconds": 0.947,
+          "throughput_req_per_sec": 105.57,
+          "error_rate": 0.0,
+          "p50_ms": 137.9,
+          "p90_ms": 376.87,
+          "p95_ms": 436.14,
+          "p99_ms": 555.37,
+          "mean_ms": 171.82,
+          "min_ms": 33.94,
+          "max_ms": 715.42
+        }
+      }
+    }
+  }
+}

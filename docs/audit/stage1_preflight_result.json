@@ -1,0 +1,178 @@
+{
+  "stage": "stage1_preflight",
+  "status": "COMPLETED",
+  "dry_run": false,
+  "execute_once": true,
+  "approval_id": "s1_85f032d67045433f",
+  "execution_id": "exec_d91ef7f6a583485a",
+  "worker_id": "UNIVERSE-pid9344-57207c84",
+  "authorized_by": "Dinesh",
+  "recovered_from_approval_id": null,
+  "checked_at_utc": "2026-11-27T06:49:34.155629+00:00",
+  "hard_attempt_cap": 16,
+  "attempts_consumed": 16,
+  "daily_quota_used_today": 16,
+  "daily_quota_remaining": 32,
+  "daily_quota_cap": 48,
+  "budget_exhausted": false,
+  "recurring_polling_opt_in_enabled": false,
+  "summary": {
+    "total_locations": 8,
+    "active": 1,
+    "inactive": 7,
+    "unknown": 0
+  },
+  "locations": [
+    {
+      "provider_location_id": 154,
+      "station_name": "Westminster - Marylebone Road",
+      "status": "inactive",
+      "pm25_sensor_id": 246,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-11-27T04:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "London Air Quality Network",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "UK OGL \"Open Government License\""
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 157,
+      "station_name": "Bexley - Slade Green",
+      "status": "active",
+      "pm25_sensor_id": 254,
+      "last_observed_at": "2026-11-25T11:00:00+00:00",
+      "metadata_last_utc": "2026-11-27T05:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "London Air Quality Network",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "UK OGL \"Open Government License\""
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": []
+    },
+    {
+      "provider_location_id": 141,
+      "station_name": "London Harlington - UKA00472",
+      "status": "inactive",
+      "pm25_sensor_id": 261,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T13:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 153,
+      "station_name": "London Hillingdon - UKA00266",
+      "status": "inactive",
+      "pm25_sensor_id": 1927060,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T13:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 698,
+      "station_name": "Southampton Centre - UKA00235",
+      "status": "inactive",
+      "pm25_sensor_id": 1213,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T13:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 804,
+      "station_name": "Wicken Fen - UKA00362",
+      "status": "inactive",
+      "pm25_sensor_id": 1999688,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T13:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 1795,
+      "station_name": "St Osyth - UKA00445",
+      "status": "inactive",
+      "pm25_sensor_id": 1732639,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T12:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    },
+    {
+      "provider_location_id": 2312,
+      "station_name": "Manchester Piccadilly - UKA00248",
+      "status": "inactive",
+      "pm25_sensor_id": 5269,
+      "last_observed_at": null,
+      "metadata_last_utc": "2026-05-26T13:00:00Z",
+      "source_attribution": {
+        "upstream_provider": "EEA",
+        "owner": "Unknown Governmental Organization",
+        "licenses": [
+          "ODC-BY"
+        ]
+      },
+      "attempts_consumed": 2,
+      "errors": [
+        "no recent hourly PM2.5 measurements within 48h"
+      ]
+    }
+  ],
+  "errors": []
+}
