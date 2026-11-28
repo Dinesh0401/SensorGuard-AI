@@ -36,7 +36,11 @@ from sensorguard.db.schema import (
     PilotIngestAuditRun,
     Sensor,
 )
-from sensorguard.models.data import build_spatiotemporal_features, partition_dataset
+from sensorguard.models.data import (
+    build_spatiotemporal_features,
+    load_pilot_dataset_from_db,
+    partition_dataset,
+)
 from sensorguard.models.forecasters import (
     LightGBMPointForecaster,
     LightGBMQuantileForecaster,
@@ -219,10 +223,34 @@ def fit_shadow_suite(
             artifact_dir=resolved_art_dir,
         )
 
+    resolved_art_dir.mkdir(parents=True, exist_ok=True)
+    manifest_payload = {
+        "schema_format": "sensorguard.shadow_manifest.v1",
+        "artifact_format": "sensorguard.shadow_artifact.v1",
+        "feature_columns": cols,
+        "nominal_coverage": nominal_coverage,
+        "model_created_at": fit_finished_at.isoformat(),
+        "model_provenance": {
+            k: {mk: mv.isoformat() if isinstance(mv, datetime) else mv for mk, mv in m_meta.items()}
+            for k, m_meta in provenance.items()
+        },
+    }
+    manifest_path = resolved_art_dir / "shadow_manifest.json"
+    fd, tmp_name = tempfile.mkstemp(prefix=".shadow_manifest_", suffix=".json", dir=str(resolved_art_dir))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(manifest_payload, indent=2, sort_keys=True) + "\n")
+        os.replace(tmp_name, manifest_path)
+    except Exception:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+        raise
+
     return {
         "feature_columns": cols,
         "nominal_coverage": nominal_coverage,
         "artifact_dir": str(resolved_art_dir),
+        "manifest_path": str(manifest_path),
         "model_provenance": provenance,
         "persistence": (persist, persist_cal),
         "locally_weighted_mar": mar_local,
@@ -231,6 +259,83 @@ def fit_shadow_suite(
         "sage_static": sage_static,
         "sage_adaptive": sage_adaptive,
     }
+
+
+def load_shadow_suite_from_dir(
+    artifact_dir: str | Path | None = None,
+    evaluation_time: datetime | None = None,
+) -> dict[str, Any]:
+    """Load and cryptographically verify all 5 serialized shadow models from manifest directory."""
+    raw_dir = artifact_dir or os.getenv("SENSORGUARD_SHADOW_ARTIFACT_DIR")
+    if not raw_dir:
+        raise ValueError(
+            "Shadow artifact directory not specified and SENSORGUARD_SHADOW_ARTIFACT_DIR is unset."
+        )
+    art_dir = Path(raw_dir)
+    manifest_path = art_dir / "shadow_manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Shadow suite manifest missing at {manifest_path}. Run build-shadow-artifacts first."
+        )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    feature_cols = list(manifest.get("feature_columns") or [])
+    if not feature_cols:
+        raise ValueError(f"Invalid shadow manifest {manifest_path}: empty feature_columns.")
+    nominal_cov = float(manifest.get("nominal_coverage") or 0.90)
+    prov_map = manifest.get("model_provenance")
+    if not isinstance(prov_map, dict):
+        raise TypeError(f"Invalid shadow manifest {manifest_path}: missing model_provenance mapping.")
+
+    eval_dt = _to_utc(evaluation_time) if evaluation_time is not None else None
+    loaded_models: dict[str, Any] = {}
+    verified_prov: dict[str, dict[str, Any]] = {}
+    for m_key, spec in SHADOW_MODEL_SPECS.items():
+        entry = dict(prov_map.get(m_key, {}))
+        art_path = entry.get("artifact_path")
+        if art_path and not Path(str(art_path)).exists():
+            candidate = art_dir / Path(str(art_path)).name
+            if candidate.exists():
+                entry["artifact_path"] = str(candidate)
+        loaded_model, loaded_meta = verify_and_load_shadow_artifact(
+            provenance_entry=entry,
+            expected_model_key=m_key,
+            expected_spec=spec,
+            expected_feature_columns=feature_cols,
+            expected_nominal_coverage=nominal_cov,
+            evaluation_time=eval_dt,
+        )
+        loaded_models[m_key] = loaded_model
+        verified_prov[m_key] = loaded_meta
+
+    return {
+        "feature_columns": feature_cols,
+        "nominal_coverage": nominal_cov,
+        "artifact_dir": str(art_dir),
+        "manifest_path": str(manifest_path),
+        "model_provenance": verified_prov,
+        **loaded_models,
+    }
+
+
+def build_and_save_shadow_suite(
+    session: Session,
+    artifact_dir: str | Path | None = None,
+    nominal_coverage: float = 0.90,
+    model_created_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Build spatiotemporal features from database history and write verified JSON shadow suite."""
+    df, coords = load_pilot_dataset_from_db(session)
+    if df.empty:
+        raise ValueError("Database contains no dataset observations to fit shadow suite.")
+    featured = build_spatiotemporal_features(df, coords)
+    return fit_shadow_suite(
+        featured_df=featured,
+        station_coords=coords,
+        nominal_coverage=nominal_coverage,
+        artifact_dir=artifact_dir,
+        session=session,
+        model_created_at=model_created_at,
+    )
 
 
 def _predict_single_shadow_model(

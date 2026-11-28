@@ -84,11 +84,22 @@ Archived evidence JSON: [`docs/audit/stage1_preflight_result.json`](audit/stage1
 
 ---
 
-## 4. Stage 2 Hold Criteria (Not Approved Today)
+## 4. Stage 2 Hold Criteria & Operational Prep Commands (Not Approved Today)
+
+Stage 2 operational CLI tooling is ready and strictly **fail-closed by default** (`pilot-cycle` defaults to zero-network dry-run targeting Stage 1 active location `157`; `--execute-poll` remains blocked `SKIPPED_KILL_SWITCH` until `PilotControlState("openaq_live_polling")` is explicitly unlocked):
+
+```bash
+# Provision verified sensorguard.shadow_artifact.v1 JSON files + shadow_manifest.json (0 network calls)
+python -m sensorguard.cli build-shadow-artifacts --output-dir artifacts/shadow_suite
+
+# Stage 2 safe dry-run check (0 network calls, defaults to location 157)
+SENSORGUARD_SHADOW_ARTIFACT_DIR=artifacts/shadow_suite \
+python -m sensorguard.cli pilot-cycle --location-ids 157
+```
 
 Do **not** authorize Stage 2 recurring polling until:
-1. Operator decides whether Stage 2 should monitor solely active location `(157,)` (degraded single-station neighbor mode, `1–2` req/run within `48 req/day`) or first discover replacement active neighboring UK PM2.5 stations, and wires a Stage 2 worker CLI entrypoint restricting `BoundedPilotConfig.allowed_location_ids` cleanly.
-2. `SENSORGUARD_SHADOW_ARTIFACT_DIR` is provisioned with verified `.json` shadow artifacts (`sensorguard.shadow_artifact.v1`) and prospective forecasts enforce post-commit completion proof (`commit_completed_at`, `min_lead_seconds >= 300s`, `commit_safety_margin_seconds >= 15s`).
+1. Operator decides whether Stage 2 should monitor solely active location `(157,)` (degraded single-station neighbor mode, `1–2` req/run within `48 req/day`) or first discover replacement active neighboring UK PM2.5 stations, passing explicit `--location-ids` cleanly.
+2. `SENSORGUARD_SHADOW_ARTIFACT_DIR` is provisioned with verified `.json` shadow artifacts (`build-shadow-artifacts` -> `sensorguard.shadow_artifact.v1` + `shadow_manifest.json`) and prospective forecasts enforce post-commit completion proof (`commit_completed_at`, `min_lead_seconds >= 300s`, `commit_safety_margin_seconds >= 15s`).
 3. Minimum prospective duration (`>= 7` days / `>= 168h`; hard floor `min_unique_hours >= 24`, `min_matched_outcomes >= 100`) and practitioner usability study ([REAL_USER_USABILITY_STUDY.md](REAL_USER_USABILITY_STUDY.md)) pass before any model promotion.
 
 ---
